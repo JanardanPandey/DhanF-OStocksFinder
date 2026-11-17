@@ -1,0 +1,661 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Dhan SMC Setup Desk — Order Block, Trend &amp; S/R Paper Trader</title>
+  <link rel="stylesheet" href="/static/styles.css?v=20261113_live2" />
+  <script src="https://unpkg.com/lightweight-charts@4.2.1/dist/lightweight-charts.standalone.production.js" defer></script>
+  <script src="/static/app.js?v=20261116_live4" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-mark" aria-hidden="true">OB</div>
+      <div>
+        <h1>Dhan SMC Setup Desk</h1>
+        <p class="subtitle">F&amp;O Stocks · Order Blocks · Market Structure · Tight-SL Paper Trading</p>
+      </div>
+    </div>
+
+    <div class="topbar-actions">
+      <div id="dhan-status-pill" class="status-pill status-demo" title="Dhan API connection state">
+        <span class="dot" aria-hidden="true"></span>
+        <span id="dhan-status-text">Checking Dhan API...</span>
+      </div>
+
+      <div class="kpi-chip">
+        <span class="kpi-label">Paper Equity</span>
+        <strong id="header-equity">₹1,00,000</strong>
+      </div>
+      <div class="kpi-chip">
+        <span class="kpi-label">Net PnL</span>
+        <strong id="header-pnl">₹0</strong>
+      </div>
+
+      <button type="button" id="btn-scan" class="btn btn-primary">Run Scan</button>
+      <button type="button" id="btn-open-settings" class="btn btn-ghost">Dhan &amp; Risk Settings</button>
+    </div>
+  </header>
+
+  <!-- TOKEN EXPIRED QUICK ALERT BANNER -->
+  <div id="token-expired-banner" class="token-alert-banner" style="display:none;" hidden>
+    <div>
+      <span style="font-size:1.1rem;margin-right:0.35rem;">⚠️</span>
+      <strong>Dhan 24h Live Token Expired:</strong> Running in cached simulation mode. Paste fresh 24h token to stream live ticks.
+    </div>
+    <button type="button" id="btn-quick-token-popup" class="btn btn-primary btn-sm">Paste Token &amp; Activate</button>
+  </div>
+
+  <main class="container">
+    <div class="tabs-shell">
+      <div class="tablist" role="tablist" aria-label="Dashboard sections">
+        <button type="button" role="tab" id="tab-ideas" aria-selected="true" tabindex="0" data-panel="panel-ideas">
+          Trading Ideas &amp; Chart
+        </button>
+        <button type="button" role="tab" id="tab-watchlist" aria-selected="false" tabindex="-1" data-panel="panel-watchlist">
+          T-1 Watchlist (<span id="tab-watchlist-count">0</span>)
+        </button>
+        <button type="button" role="tab" id="tab-alerts" aria-selected="false" tabindex="-1" data-panel="panel-alerts">
+          🔴 Live Alerts (<span id="tab-alerts-count">0</span>)
+        </button>
+        <button type="button" role="tab" id="tab-paper" aria-selected="false" tabindex="-1" data-panel="panel-paper">
+          Paper Portfolio (<span id="tab-open-count">0</span>)
+        </button>
+        <button type="button" role="tab" id="tab-universe" aria-selected="false" tabindex="-1" data-panel="panel-universe">
+          F&amp;O Universe (<span id="tab-universe-count">0</span>)
+        </button>
+      </div>
+
+      <!-- PANEL 1: TRADING IDEAS & CHART -->
+      <section role="tabpanel" id="panel-ideas" aria-labelledby="tab-ideas" class="tabpanel">
+        <div class="panel-body">
+          <!-- Playbook v2 Live Market Breadth & #1 Top Pick Strip -->
+          <div class="breadth-strip" id="breadth-strip">
+            <div class="breadth-metric">
+              <span class="kpi-label">Market Liquidity</span>
+              <strong id="breadth-liquidity-counts">—</strong>
+            </div>
+            <div class="breadth-metric">
+              <span class="kpi-label">F&amp;O &gt; VWAP (55% Gate)</span>
+              <strong id="breadth-vwap-pct">—</strong>
+            </div>
+            <div class="breadth-metric">
+              <span class="kpi-label">F&amp;O &gt; Open</span>
+              <strong id="breadth-open-pct">—</strong>
+            </div>
+            <div class="breadth-metric">
+              <span class="kpi-label">NSE Advances (C&gt;PDC)</span>
+              <strong id="breadth-adv-pct">—</strong>
+            </div>
+            <div class="breadth-metric">
+              <span class="kpi-label">Breadth Regime</span>
+              <span id="breadth-regime-badge" class="badge">—</span>
+            </div>
+            <div class="breadth-metric breadth-top-pick">
+              <span class="kpi-label">#1 Best Pick</span>
+              <button type="button" id="btn-jump-rank1" class="btn btn-ghost btn-sm">—</button>
+            </div>
+          </div>
+
+          <div class="toolbar">
+            <div class="filter-group">
+              <label for="filter-playbook">Playbook</label>
+              <select id="filter-playbook">
+                <option value="ALL">All Setups</option>
+                <option value="CREAM_BULL_V2">Cream Bull v2</option>
+                <option value="STRICT_BEAR_V2">Strict Bear v2</option>
+                <option value="P14B_RECLAIM">P14B Reclaim</option>
+                <option value="MONSTER">Monster Runner DNA</option>
+                <option value="SMC_OB">SMC OB / FVG</option>
+              </select>
+
+              <label for="filter-style">Style</label>
+              <select id="filter-style">
+                <option value="ALL">All (Intraday + Swing)</option>
+                <option value="INTRADAY">Intraday (1h/15m → 5m)</option>
+                <option value="SWING">Swing (1D/1h → 15m)</option>
+              </select>
+
+              <label for="filter-dir">Bias</label>
+              <select id="filter-dir">
+                <option value="ALL">All Directions</option>
+                <option value="LONG">LONG Only</option>
+                <option value="SHORT">SHORT Only</option>
+              </select>
+
+              <label for="filter-grade">Grade</label>
+              <select id="filter-grade">
+                <option value="ALL">All Grades</option>
+                <option value="A+">Grade A+</option>
+                <option value="A">Grade A</option>
+                <option value="B">Grade B</option>
+              </select>
+            </div>
+
+            <div class="toolbar-meta">
+              <span id="scan-meta-text" class="muted">Ready</span>
+            </div>
+          </div>
+
+          <div class="workspace-grid">
+            <!-- Left: Sortable Scanner Table -->
+            <div class="card">
+              <div class="card-header">
+                <h2 id="ideas-table-caption">Ranked Setups (Playbook v2 + SMC)</h2>
+                <span id="ideas-count-badge" class="badge">0 setups</span>
+              </div>
+              <div tabindex="0" role="region" aria-labelledby="ideas-table-caption" class="table-wrapper table-wrapper-scroll">
+                <table id="ideas-table" class="data-table">
+                  <caption class="sr-only">Ranked Trading Setups with Trigger Time and Reason</caption>
+                  <thead>
+                    <tr>
+                      <th scope="col" data-type="number" aria-sort="ascending"><button type="button" class="sort-btn">Rank <span aria-hidden="true" class="sort-icon"></span></button></th>
+                      <th scope="col" data-type="text"><button type="button" class="sort-btn">Symbol <span aria-hidden="true" class="sort-icon"></span></button></th>
+                      <th scope="col" data-type="text"><button type="button" class="sort-btn">Setup &amp; Trigger <span aria-hidden="true" class="sort-icon"></span></button></th>
+                      <th scope="col" data-type="text"><button type="button" class="sort-btn">Bias <span aria-hidden="true" class="sort-icon"></span></button></th>
+                      <th scope="col" data-type="number"><button type="button" class="sort-btn">Score <span aria-hidden="true" class="sort-icon"></span></button></th>
+                      <th scope="col" data-type="number"><button type="button" class="sort-btn">Entry <span aria-hidden="true" class="sort-icon"></span></button></th>
+                      <th scope="col" data-type="number"><button type="button" class="sort-btn">SL % <span aria-hidden="true" class="sort-icon"></span></button></th>
+                      <th scope="col" data-type="number"><button type="button" class="sort-btn">R:R <span aria-hidden="true" class="sort-icon"></span></button></th>
+                      <th scope="col" data-type="text"><button type="button" class="sort-btn">Why / Reason <span aria-hidden="true" class="sort-icon"></span></button></th>
+                      <th scope="col">Action</th>
+                    </tr>
+                  </thead>
+                  <tbody id="ideas-tbody"></tbody>
+                </table>
+              </div>
+              <div id="ideas-sort-status" role="status" class="sr-only"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- PANEL 2: PAPER PORTFOLIO -->
+      <section role="tabpanel" id="panel-paper" aria-labelledby="tab-paper" class="tabpanel" hidden>
+        <div class="panel-body">
+          <div class="stats-grid" id="portfolio-kpis">
+            <div class="stat-card"><span class="muted">Equity</span><strong id="kpi-equity">₹1,00,000</strong></div>
+            <div class="stat-card"><span class="muted">Realized PnL</span><strong id="kpi-realized">₹0</strong></div>
+            <div class="stat-card"><span class="muted">Unrealized MTM</span><strong id="kpi-unrealized">₹0</strong></div>
+            <div class="stat-card"><span class="muted">Win Rate</span><strong id="kpi-winrate">0%</strong></div>
+            <div class="stat-card"><span class="muted">Profit Factor</span><strong id="kpi-pf">0.00</strong></div>
+            <div class="stat-card"><span class="muted">Avg R-Multiple</span><strong id="kpi-avgr">0.00R</strong></div>
+          </div>
+
+          <div class="card">
+            <div class="card-header">
+              <h2 id="positions-caption">Open Paper Positions</h2>
+              <div class="row-actions">
+                <button type="button" id="btn-refresh-mtm" class="btn btn-ghost">Refresh Live MTM</button>
+                <button type="button" id="btn-custom-paper" class="btn btn-primary">+ Custom Paper Trade</button>
+                <button type="button" id="btn-reset-paper" class="btn btn-danger-ghost">Reset Account</button>
+              </div>
+            </div>
+            <div tabindex="0" role="region" aria-labelledby="positions-caption" class="table-wrapper">
+              <table id="positions-table" class="data-table">
+                <caption class="sr-only">Open Paper Positions</caption>
+                <thead>
+                  <tr>
+                    <th scope="col">Symbol</th>
+                    <th scope="col">Style</th>
+                    <th scope="col">Bias</th>
+                    <th scope="col">Qty</th>
+                    <th scope="col">Entry</th>
+                    <th scope="col">LTP</th>
+                    <th scope="col">SL (Init)</th>
+                    <th scope="col">TP1 / TP2</th>
+                    <th scope="col">MTM PnL</th>
+                    <th scope="col">R</th>
+                    <th scope="col">Manage</th>
+                  </tr>
+                </thead>
+                <tbody id="positions-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-header">
+              <h2 id="trades-caption">Closed Paper Trade Journal</h2>
+            </div>
+            <div tabindex="0" role="region" aria-labelledby="trades-caption" class="table-wrapper">
+              <table id="trades-table" class="data-table">
+                <caption class="sr-only">Closed Paper Trade Journal</caption>
+                <thead>
+                  <tr>
+                    <th scope="col" data-type="text"><button type="button" class="sort-btn">Symbol <span aria-hidden="true" class="sort-icon"></span></button></th>
+                    <th scope="col" data-type="text"><button type="button" class="sort-btn">Style <span aria-hidden="true" class="sort-icon"></span></button></th>
+                    <th scope="col" data-type="text"><button type="button" class="sort-btn">Bias <span aria-hidden="true" class="sort-icon"></span></button></th>
+                    <th scope="col" data-type="number"><button type="button" class="sort-btn">Qty <span aria-hidden="true" class="sort-icon"></span></button></th>
+                    <th scope="col" data-type="number"><button type="button" class="sort-btn">Entry <span aria-hidden="true" class="sort-icon"></span></button></th>
+                    <th scope="col" data-type="number"><button type="button" class="sort-btn">Exit <span aria-hidden="true" class="sort-icon"></span></button></th>
+                    <th scope="col" data-type="number"><button type="button" class="sort-btn">Net PnL <span aria-hidden="true" class="sort-icon"></span></button></th>
+                    <th scope="col" data-type="number"><button type="button" class="sort-btn">R <span aria-hidden="true" class="sort-icon"></span></button></th>
+                    <th scope="col" data-type="text"><button type="button" class="sort-btn">Reason <span aria-hidden="true" class="sort-icon"></span></button></th>
+                  </tr>
+                </thead>
+                <tbody id="trades-tbody"></tbody>
+              </table>
+            </div>
+            <div id="trades-sort-status" role="status" class="sr-only"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- PANEL 3: F&O UNIVERSE -->
+      <section role="tabpanel" id="panel-universe" aria-labelledby="tab-universe" class="tabpanel" hidden>
+        <div class="panel-body">
+          <div class="card">
+            <div class="card-header">
+              <h2 id="universe-caption">NSE F&amp;O Stock Universe (Dhan Scrip Master)</h2>
+              <div class="row-actions">
+                <input type="search" id="universe-search" placeholder="Search symbol or company..." aria-label="Search F&O stocks" />
+                <button type="button" id="btn-sync-universe" class="btn btn-ghost">Re-sync Scrip Master</button>
+              </div>
+            </div>
+            <div tabindex="0" role="region" aria-labelledby="universe-caption" class="table-wrapper">
+              <table id="universe-table" class="data-table">
+                <caption class="sr-only">NSE F&O Stock Universe</caption>
+                <thead>
+                  <tr>
+                    <th scope="col">Symbol</th>
+                    <th scope="col">Company</th>
+                    <th scope="col">NSE_EQ Security ID</th>
+                    <th scope="col">F&amp;O Lot Size</th>
+                    <th scope="col">Inspect</th>
+                  </tr>
+                </thead>
+                <tbody id="universe-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- PANEL 4: DATE-WISE T-1 WATCHLIST + LIVE MOMENTUM BOARD SIDE-BY-SIDE -->
+      <section role="tabpanel" id="panel-watchlist" aria-labelledby="tab-watchlist" class="tabpanel" hidden>
+        <div class="panel-body">
+          <pre id="watchlist-copy-source" class="sr-only"></pre>
+
+          <div class="watchlist-split">
+            <!-- LEFT TABLE: STATIC T-1 PRE-MARKET WATCHLIST -->
+            <div class="card">
+              <div class="card-header">
+                <div>
+                  <h2 id="watchlist-caption">T-1 Pre-Market Watchlist (Fixed Reference)</h2>
+                  <p class="muted">Institutional PM Footprints · Never overwritten before 14:45 IST</p>
+                </div>
+                <span id="watchlist-meta-badge" class="badge">0 stocks</span>
+              </div>
+              <div class="sub-toolbar">
+                <div class="filter-group">
+                  <label for="watchlist-date-select">Date</label>
+                  <select id="watchlist-date-select"></select>
+
+                  <label for="watchlist-bias-filter">Bias</label>
+                  <select id="watchlist-bias-filter">
+                    <option value="ALL">All</option>
+                    <option value="LONG">LONG</option>
+                    <option value="SHORT">SHORT</option>
+                    <option value="MONSTER">Monster DNA</option>
+                  </select>
+                </div>
+                <div class="row-actions">
+                  <button type="button" id="btn-build-watchlist" class="btn btn-ghost btn-sm">Rebuild T-1</button>
+                  <span class="copy">
+                    <button type="button" id="btn-copy-watchlist" class="btn btn-primary btn-sm copy-btn" aria-label="Copy NSE formatted watchlist symbols">
+                      Copy NSE:SYM
+                    </button>
+                    <span id="watchlist-copy-tip" class="copy-tip" role="status"></span>
+                  </span>
+                  <a id="btn-download-watchlist-csv" class="btn btn-ghost btn-sm" href="/api/watchlist/csv" download>CSV</a>
+                </div>
+              </div>
+              <div tabindex="0" role="region" aria-labelledby="watchlist-caption" class="table-wrapper table-wrapper-scroll">
+                <table id="watchlist-table" class="data-table">
+                  <caption class="sr-only">Date-wise T-1 Ranked Watchlist</caption>
+                  <thead>
+                    <tr>
+                      <th scope="col" data-type="number" aria-sort="ascending"><button type="button" class="sort-btn">Rank <span aria-hidden="true" class="sort-icon"></span></button></th>
+                      <th scope="col" data-type="text"><button type="button" class="sort-btn">Symbol <span aria-hidden="true" class="sort-icon"></span></button></th>
+                      <th scope="col" data-type="text"><button type="button" class="sort-btn">Bias <span aria-hidden="true" class="sort-icon"></span></button></th>
+                      <th scope="col" data-type="number"><button type="button" class="sort-btn">Score <span aria-hidden="true" class="sort-icon"></span></button></th>
+                      <th scope="col" data-type="text"><button type="button" class="sort-btn">Trigger Window <span aria-hidden="true" class="sort-icon"></span></button></th>
+                      <th scope="col" data-type="text"><button type="button" class="sort-btn">Tags / Reason <span aria-hidden="true" class="sort-icon"></span></button></th>
+                      <th scope="col">Action</th>
+                    </tr>
+                  </thead>
+                  <tbody id="watchlist-tbody"></tbody>
+                </table>
+              </div>
+              <div id="watchlist-sort-status" role="status" class="sr-only"></div>
+            </div>
+
+            <!-- RIGHT TABLE: LIVE MOMENTUM & ALL CONDITIONS MATCHED (TOP -> BOTTOM) -->
+            <div class="card">
+              <div class="card-header">
+                <div>
+                  <h2 id="live-momentum-caption">Live Momentum Confirmed (Option-Timed Rank)</h2>
+                  <p class="muted">Pullback Reclaims, Coil Breakouts &amp; Clean Legs Ranked Top — Stretched/Choppy Decay Traps Demoted</p>
+                </div>
+                <span id="live-momentum-badge" class="badge">0 active</span>
+              </div>
+              <div class="sub-toolbar">
+                <div class="filter-group">
+                  <label for="live-mom-bias-filter">Filter</label>
+                  <select id="live-mom-bias-filter">
+                    <option value="OPTION_READY" selected>Option-Ready Only (No Decay Traps)</option>
+                    <option value="ALL">All Momentum Movers (incl. Extended/Chop)</option>
+                    <option value="WL">T-1 Watchlist Match Only</option>
+                    <option value="LONG">LONG Momentum (&gt;VWAP)</option>
+                    <option value="SHORT">SHORT Momentum (&lt;VWAP)</option>
+                    <option value="MONSTER">Monster DNA Only</option>
+                  </select>
+                </div>
+                <div class="row-actions">
+                  <button type="button" id="btn-refresh-live-momentum" class="btn btn-primary btn-sm">Refresh Live Momentum</button>
+                </div>
+              </div>
+              <div tabindex="0" role="region" aria-labelledby="live-momentum-caption" class="table-wrapper table-wrapper-scroll">
+                <table id="live-momentum-table" class="data-table">
+                  <caption class="sr-only">Live Momentum and Condition Matched Ranked Stocks</caption>
+                  <thead>
+                    <tr>
+                      <th scope="col" data-type="number" aria-sort="ascending"><button type="button" class="sort-btn">Rank <span aria-hidden="true" class="sort-icon"></span></button></th>
+                      <th scope="col" data-type="text"><button type="button" class="sort-btn">Symbol &amp; Delta <span aria-hidden="true" class="sort-icon"></span></button></th>
+                      <th scope="col" data-type="text"><button type="button" class="sort-btn">Bias &amp; Setup <span aria-hidden="true" class="sort-icon"></span></button></th>
+                      <th scope="col" data-type="text"><button type="button" class="sort-btn">Order Block (OB) <span aria-hidden="true" class="sort-icon"></span></button></th>
+                      <th scope="col" data-type="text"><button type="button" class="sort-btn">Option Strike Pick <span aria-hidden="true" class="sort-icon"></span></button></th>
+                      <th scope="col" data-type="number"><button type="button" class="sort-btn">Move &amp; VWAP <span aria-hidden="true" class="sort-icon"></span></button></th>
+                      <th scope="col" data-type="text"><button type="button" class="sort-btn">Trigger &amp; Conditions <span aria-hidden="true" class="sort-icon"></span></button></th>
+                      <th scope="col">Action</th>
+                    </tr>
+                  </thead>
+                  <tbody id="live-momentum-tbody"></tbody>
+                </table>
+              </div>
+              <div id="live-momentum-sort-status" role="status" class="sr-only"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- PANEL 5: REAL-TIME AUDIT LOG OF LIVE ALERTS -->
+      <section role="tabpanel" id="panel-alerts" aria-labelledby="tab-alerts" class="tabpanel" hidden>
+        <div class="panel-body">
+          <div class="card">
+            <div class="card-header">
+              <div>
+                <h2 id="live-alerts-caption">🔴 Live Market Trigger Alerts (Append-Only Chronological Timeline)</h2>
+                <p class="muted">Never overwritten — every trigger time, Order Block breakout, target hit, and call unwinding squeeze is permanently preserved.</p>
+              </div>
+              <div class="row-actions">
+                <button type="button" id="btn-toggle-sound" class="btn btn-ghost btn-sm" aria-pressed="true">
+                  <span id="sound-icon">🔔</span> Audio Chime: <strong id="sound-state">ON</strong>
+                </button>
+                <span id="alerts-count-badge" class="badge">0 alerts</span>
+              </div>
+            </div>
+
+            <div class="sub-toolbar">
+              <div class="filter-group">
+                <label for="alerts-event-filter">Filter Event</label>
+                <select id="alerts-event-filter">
+                  <option value="ALL" selected>All Trigger Events</option>
+                  <option value="BREAKOUTS">OB Breakouts &amp; Expansions</option>
+                  <option value="SMC">Order Block Formations &amp; Retests</option>
+                  <option value="SQUEEZE">Call Unwinding Squeezes</option>
+                  <option value="EXITS">Targets Hit &amp; Invalidation Exits</option>
+                </select>
+
+                <label for="alerts-symbol-search">Symbol</label>
+                <input type="search" id="alerts-symbol-search" placeholder="Filter symbol (e.g. AMBER, DIXON)..." />
+              </div>
+
+              <div class="row-actions">
+                <button type="button" id="btn-refresh-alerts" class="btn btn-primary btn-sm">Refresh Alerts</button>
+                <button type="button" id="btn-clear-alerts" class="btn btn-ghost btn-sm">Clear History</button>
+              </div>
+            </div>
+
+            <div tabindex="0" role="region" aria-labelledby="live-alerts-caption" class="table-wrapper table-wrapper-scroll">
+              <table id="live-alerts-table" class="data-table">
+                <caption class="sr-only">Live Market Trigger Alert Timeline</caption>
+                <thead>
+                  <tr>
+                    <th scope="col" data-type="text"><button type="button" class="sort-btn">Trigger Time <span aria-hidden="true" class="sort-icon"></span></button></th>
+                    <th scope="col" data-type="text"><button type="button" class="sort-btn">Symbol &amp; Bias <span aria-hidden="true" class="sort-icon"></span></button></th>
+                    <th scope="col" data-type="text"><button type="button" class="sort-btn">Event Catalyst <span aria-hidden="true" class="sort-icon"></span></button></th>
+                    <th scope="col" data-type="number"><button type="button" class="sort-btn">Price &amp; Move <span aria-hidden="true" class="sort-icon"></span></button></th>
+                    <th scope="col" data-type="text"><button type="button" class="sort-btn">Order Block Zone <span aria-hidden="true" class="sort-icon"></span></button></th>
+                    <th scope="col" data-type="text"><button type="button" class="sort-btn">Option Strike Recommendation <span aria-hidden="true" class="sort-icon"></span></button></th>
+                    <th scope="col" data-type="text"><button type="button" class="sort-btn">OI / Delta Catalyst <span aria-hidden="true" class="sort-icon"></span></button></th>
+                    <th scope="col">Action</th>
+                  </tr>
+                </thead>
+                <tbody id="live-alerts-tbody"></tbody>
+              </table>
+            </div>
+            <div id="live-alerts-sort-status" role="status" class="sr-only"></div>
+          </div>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <!-- NATIVE FULL-SCREEN MODAL: INTERACTIVE CHART & SETUP CONFLUENCE -->
+  <dialog id="chart-dialog" class="chart-dialog" aria-labelledby="chart-symbol-title" closedby="any">
+    <div class="dialog-header chart-modal-header">
+      <div>
+        <h2 id="chart-symbol-title">Select a stock</h2>
+        <p id="chart-symbol-meta" class="muted">Click any setup or F&amp;O stock to inspect Order Blocks, FVGs &amp; S/R</p>
+      </div>
+      <div class="row-actions">
+        <div class="tf-switcher" role="group" aria-label="Chart timeframe">
+          <button type="button" class="tf-btn" data-tf="5m">5m</button>
+          <button type="button" class="tf-btn active" data-tf="15m">15m</button>
+          <button type="button" class="tf-btn" data-tf="1h">1h</button>
+          <button type="button" class="tf-btn" data-tf="1D">1D</button>
+        </div>
+        <button type="button" class="btn-icon" id="close-chart-btn" aria-label="Close chart modal" autofocus>✕</button>
+      </div>
+    </div>
+
+    <div class="chart-toolbar" role="toolbar" focusgroup="toolbar wrap" aria-label="Chart overlays" aria-controls="chart-container">
+      <div class="toolbar-group" role="group" aria-label="Overlay layers">
+        <button type="button" class="layer-btn" data-layer="trade" aria-pressed="true" title="Toggle Entry, SL, TP1, TP2 levels">
+          <i class="swatch trade-swatch" aria-hidden="true"></i>Trade Plan
+        </button>
+        <button type="button" class="layer-btn" data-layer="sr" aria-pressed="false" title="Toggle nearest Support &amp; Resistance levels">
+          <i class="swatch sr-swatch" aria-hidden="true"></i>Key S/R
+        </button>
+        <button type="button" class="layer-btn" data-layer="zones" aria-pressed="false" title="Toggle latest Order Block &amp; Fair Value Gap">
+          <i class="swatch ob-bull" aria-hidden="true"></i>OB / FVG
+        </button>
+        <button type="button" class="layer-btn" data-layer="signals" aria-pressed="false" title="Toggle BOS, CHoCH &amp; Sweep candle markers">
+          <i class="swatch fvg-swatch" aria-hidden="true"></i>BOS / Sweep
+        </button>
+      </div>
+      <span class="toolbar-sep" role="separator" aria-orientation="vertical"></span>
+      <div class="toolbar-group" role="group" aria-label="Chart view">
+        <button type="button" class="layer-btn" id="btn-chart-fit" title="Fit all candles cleanly to screen width">Fit</button>
+        <span id="chart-layer-note" class="muted chart-layer-note"></span>
+      </div>
+    </div>
+
+    <div class="chart-modal-body">
+      <div id="chart-container" class="chart-box"></div>
+      <div id="selected-setup-details" class="setup-detail-box">
+        <p class="muted">No setup selected yet.</p>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- NATIVE MODAL: DHAN & RISK SETTINGS -->
+  <dialog id="settings-dialog" aria-labelledby="settings-title" closedby="any">
+    <div class="dialog-header">
+      <h2 id="settings-title">Dhan API &amp; Tight-SL Risk Settings</h2>
+      <button type="button" class="btn-icon" id="close-settings-btn" aria-label="Close settings">✕</button>
+    </div>
+
+    <div class="dialog-body">
+      <section class="dialog-section">
+        <h3>1. DhanHQ v2 Live Data Connection</h3>
+        <p id="auth-diag-msg" class="muted"></p>
+        <div class="form-grid">
+          <label>
+            Dhan Client ID
+            <input type="text" id="cfg-client-id" placeholder="e.g. 1000000001" />
+          </label>
+          <label>
+            24h Access Token (JWT)
+            <input type="password" id="cfg-access-token" placeholder="Paste Dhan Web Access Token..." />
+          </label>
+        </div>
+        <div class="row-actions">
+          <button type="button" id="btn-save-dhan-token" class="btn btn-primary">Save &amp; Connect Live Data</button>
+        </div>
+
+        <details class="oauth-details" open>
+          <summary>Or generate 24h token via Dhan API Key + Secret (OAuth Consent)</summary>
+          <p id="oauth-env-hint" class="muted"></p>
+          <div class="form-grid">
+            <label>App ID (API Key) <input type="text" id="cfg-app-id" placeholder="From .env DHAN_API_KEY" /></label>
+            <label>App Secret <input type="password" id="cfg-app-secret" placeholder="Leave blank to use .env DHAN_API_SECRET" /></label>
+          </div>
+          <div class="row-actions">
+            <button type="button" id="btn-gen-consent" class="btn btn-ghost">1. Generate Dhan Login Link</button>
+          </div>
+          <div id="consent-link-box" class="muted" hidden></div>
+          <div class="form-grid">
+            <label>Token ID from redirect URL <input type="text" id="cfg-token-id" placeholder="Paste tokenId..." /></label>
+          </div>
+          <button type="button" id="btn-consume-consent" class="btn btn-primary">2. Activate Access Token</button>
+        </details>
+      </section>
+
+      <section class="dialog-section">
+        <h3>2. Small Stop-Loss &amp; Paper Trading Rules</h3>
+        <div class="form-grid">
+          <label>Risk per Trade (₹) <input type="number" id="cfg-risk-inr" min="100" step="100" /></label>
+          <label>Min R:R Ratio <input type="number" id="cfg-min-rr" min="1.2" step="0.1" /></label>
+          <label>Max Intraday SL (%) <input type="number" id="cfg-max-sl-intra" min="0.15" max="3.0" step="0.05" /></label>
+          <label>Max Swing SL (%) <input type="number" id="cfg-max-sl-swing" min="0.4" max="5.0" step="0.1" /></label>
+        </div>
+        <label class="checkbox-row">
+          <input type="checkbox" id="cfg-auto-paper" />
+          Auto-enter Grade A+ READY_NOW setups in Paper Portfolio
+        </label>
+        <div class="row-actions">
+          <button type="button" id="btn-save-risk" class="btn btn-primary">Save Risk Rules</button>
+        </div>
+      </section>
+    </div>
+  </dialog>
+
+  <!-- NATIVE MODAL: CONFIRM / CUSTOM PAPER TRADE -->
+  <dialog id="order-dialog" aria-labelledby="order-title" closedby="any">
+    <div class="dialog-header">
+      <h2 id="order-title">Confirm Paper Trade</h2>
+      <button type="button" class="btn-icon" id="close-order-btn" aria-label="Close order modal">✕</button>
+    </div>
+    <form id="order-form" class="dialog-body">
+      <input type="hidden" id="ord-setup-id" />
+      <div class="form-grid">
+        <label>Symbol <input type="text" id="ord-symbol" required /></label>
+        <label>Style
+          <select id="ord-style">
+            <option value="INTRADAY">INTRADAY</option>
+            <option value="SWING">SWING</option>
+          </select>
+        </label>
+        <label>Bias
+          <select id="ord-direction">
+            <option value="LONG">LONG</option>
+            <option value="SHORT">SHORT</option>
+          </select>
+        </label>
+        <label>Qty (Shares) <input type="number" id="ord-qty" min="1" required /></label>
+        <label>Entry Price (₹) <input type="number" id="ord-entry" step="0.05" required /></label>
+        <label>Stop-Loss (₹) <input type="number" id="ord-sl" step="0.05" required /></label>
+        <label>TP1 50% + BE (₹) <input type="number" id="ord-tp1" step="0.05" required /></label>
+        <label>TP2 Final (₹) <input type="number" id="ord-tp2" step="0.05" required /></label>
+      </div>
+      <p id="ord-risk-preview" class="muted"></p>
+      <div class="row-actions end">
+        <button type="button" id="cancel-order-btn" class="btn btn-ghost">Cancel</button>
+        <button type="submit" class="btn btn-primary" autofocus>Execute Paper Trade</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- NATIVE MODAL: REAL-TIME OPTION CHAIN & CALL/PUT UNWINDING SQUEEZE -->
+  <dialog id="option-chain-dialog" class="option-chain-dialog" aria-labelledby="oc-title" closedby="any">
+    <div class="dialog-header">
+      <div>
+        <h2 id="oc-title">Option Chain &amp; Squeeze Analyzer</h2>
+        <p id="oc-meta" class="muted">Live Open Interest, Unwinding Squeeze, and High-Delta Strike Recommendation</p>
+      </div>
+      <button type="button" class="btn-icon" id="close-oc-btn" aria-label="Close option chain modal">✕</button>
+    </div>
+    <div class="dialog-body">
+      <div id="oc-summary-card" class="oc-summary-card">
+        <!-- Injected dynamically -->
+      </div>
+      <div tabindex="0" role="region" aria-label="Option chain strike table" class="table-wrapper table-wrapper-scroll">
+        <table id="oc-table" class="data-table oc-data-table">
+          <thead>
+            <tr>
+              <th colspan="3" class="oc-call-head">CALLS (CE)</th>
+              <th rowspan="2" class="oc-strike-head">STRIKE</th>
+              <th colspan="3" class="oc-put-head">PUTS (PE)</th>
+            </tr>
+            <tr>
+              <th>Call OI</th>
+              <th>Δ OI (Chg%)</th>
+              <th>LTP</th>
+              <th>LTP</th>
+              <th>Δ OI (Chg%)</th>
+              <th>Put OI</th>
+            </tr>
+          </thead>
+          <tbody id="oc-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- NATIVE MODAL: QUICK DHAN 24H TOKEN POPUP -->
+  <dialog id="quick-token-dialog" class="quick-token-dialog" aria-labelledby="quick-token-title" closedby="any">
+    <div class="dialog-header">
+      <div>
+        <h2 id="quick-token-title">🔑 Dhan 24h Access Token</h2>
+        <p class="muted">Paste your fresh 24-hour token below. It will automatically activate and connect live data.</p>
+      </div>
+      <button type="button" class="btn-icon" id="close-quick-token-btn" aria-label="Close token popup">✕</button>
+    </div>
+    <div class="dialog-body">
+      <div class="form-grid">
+        <label>
+          Dhan Client ID
+          <input type="text" id="quick-client-id" value="1102889258" required />
+        </label>
+        <label style="grid-column: 1 / -1;">
+          24h Access Token (JWT)
+          <textarea id="quick-access-token" rows="4" placeholder="Paste your 24h JWT token starting with eyJ..." style="width:100%;font-family:monospace;font-size:0.8rem;padding:0.5rem;background:var(--surface-2);color:var(--foreground);border:1px solid var(--border);border-radius:6px;resize:vertical;" required></textarea>
+        </label>
+      </div>
+      <div style="font-size:0.78rem;margin:0.5rem 0 1rem 0;color:var(--muted);">
+        💡 Need a fresh token? Go to <a href="https://web.dhan.co" target="_blank" rel="noopener" style="color:#38bdf8;text-decoration:underline;">web.dhan.co</a> &rarr; Profile &rarr; <strong>DhanHQ Trading APIs</strong> &rarr; Click <em>"Generate Access Token"</em>.
+      </div>
+      <div class="row-actions end">
+        <button type="button" id="cancel-quick-token-btn" class="btn btn-ghost">Cancel</button>
+        <button type="button" id="btn-save-quick-token" class="btn btn-primary" autofocus>Save &amp; Activate Immediately</button>
+      </div>
+    </div>
+  </dialog>
+
+  <div id="toast-region" class="toast-region" aria-live="polite"></div>
+</body>
+</html>
