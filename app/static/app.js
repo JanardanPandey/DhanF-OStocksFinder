@@ -63,6 +63,15 @@
   const fmtInr = (n) =>
     '₹' + Number(n || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 });
 
+  function getHtfBadgeClass(name) {
+    if (!name) return 'badge-lvl-daily';
+    const s = String(name);
+    if (s.includes('Weekly')) return 'badge-lvl-weekly';
+    if (s.includes('20D') || s.includes('EQH') || s.includes('EQL') || s.includes('Swing')) return 'badge-lvl-swing';
+    if (s.includes('Call') || s.includes('Put') || s.includes('OI')) return 'badge-lvl-oi';
+    return 'badge-lvl-daily';
+  }
+
   async function api(url, options = {}) {
     const isGet = (options.method || 'GET').toUpperCase() === 'GET';
     const reqUrl = isGet
@@ -110,6 +119,9 @@
       }
       if (tab.dataset.panel === 'panel-alerts') {
         loadLiveAlerts().catch((err) => toast(err.message));
+      }
+      if (tab.dataset.panel === 'panel-liquidity') {
+        loadLiquidityRadar().catch((err) => toast(err.message));
       }
     }
 
@@ -1031,6 +1043,8 @@
     const symFilter = (document.getElementById('alerts-symbol-search')?.value || '').trim().toUpperCase();
     const data = await api(`/api/alerts/live?event_type=${encodeURIComponent(eventFilter)}&limit=150`);
     const alerts = data.alerts || [];
+    // Ensure newest alerts are always displayed on top
+    alerts.sort((a, b) => (b.epoch_ts || 0) - (a.epoch_ts || 0));
     state.liveAlerts = alerts;
 
     let hasNew = false;
@@ -1069,11 +1083,11 @@
         ? 'badge-breakout'
         : ev === 'TARGET_R1_HIT'
         ? 'badge-target'
-        : ev === 'INVALIDATION_EXIT'
+        : ev.includes('EXIT') || ev === 'INVALIDATION_EXIT'
         ? 'badge-exit'
         : ev === 'INSTITUTIONAL_SQUEEZE'
         ? 'badge-squeeze'
-        : ev === 'OB_RETEST_BOUNCE'
+        : ev === 'OB_RETEST_BOUNCE' || ev === 'SWEEP_REVERSAL'
         ? 'badge-retest'
         : 'badge-cream';
 
@@ -1087,6 +1101,7 @@
         <td data-value="${a.symbol}">
           <div><strong>${a.symbol}</strong> <span class="badge ${dirCls}">${a.direction}</span></div>
           <div class="muted" style="font-size:0.70rem;">₹${Number(a.price).toLocaleString('en-IN', {minimumFractionDigits: 2})}</div>
+          ${a.rr_ratio ? `<div style="font-size:0.68rem;color:#38bdf8;font-weight:700;margin-top:2px;">RR ${escapeHtml(a.rr_ratio)} (+${a.reward_pts} pts)</div>` : ''}
         </td>
         <td data-value="${ev}">
           <div><span class="badge ${evCls}">${escapeHtml(ev.replaceAll('_', ' '))}</span></div>
@@ -1098,15 +1113,19 @@
         </td>
         <td data-value="${a.ob_zone}">
           <div style="font-size:0.78rem;font-weight:700;">${escapeHtml(a.ob_zone || '—')}</div>
+          ${a.htf_level_name ? `<div class="badge ${getHtfBadgeClass(a.htf_level_name)}" style="padding:1px 6px;margin:2px 0;">🏛️ ${escapeHtml(a.htf_level_name)}</div>` : ''}
           <div class="muted" style="font-size:0.70rem;">S1 ₹${a.s1} · R1 ₹${a.r1}</div>
         </td>
         <td data-value="${a.option_est_premium}">
           <div style="font-size:0.80rem;font-weight:700;color:#38bdf8;">🎯 ${escapeHtml(a.option_strike_name || '—')}</div>
-          <div style="font-size:0.72rem;color:#cbd5e1;">Prem: ~₹${a.option_est_premium} · 1L: ₹${Number(a.option_lot_capital || 0).toLocaleString('en-IN')}</div>
+          ${a.option_chain_sr ? `<div style="font-size:0.70rem;color:#cbd5e1;font-weight:600;margin:2px 0;">📊 ${escapeHtml(a.option_chain_sr)}</div>` : ''}
+          <div class="muted" style="font-size:0.70rem;">Prem: ~₹${a.option_est_premium} · 1L: ₹${Number(a.option_lot_capital || 0).toLocaleString('en-IN')}</div>
           <div class="muted" style="font-size:0.70rem;">SL ₹${a.option_sl_premium} | TP1 ₹${a.option_tp1_premium}</div>
         </td>
         <td data-value="${escapeHtml(a.oi_build_up)}">
           <div style="font-size:0.76rem;font-weight:700;color:${a.direction === 'LONG' ? '#10b981' : '#ef4444'}">${escapeHtml(a.oi_build_up || '—')}</div>
+          ${a.candle_pattern ? `<div class="badge badge-pattern" style="margin-top:2px;">🕯️ ${escapeHtml(a.candle_pattern)}</div>` : ''}
+          ${a.volume_reaction ? `<div style="font-size:0.68rem;color:#fbbf24;font-weight:600;margin-top:2px;">${escapeHtml(a.volume_reaction)}</div>` : ''}
           <div class="muted" style="font-size:0.70rem;">Delta ${escapeHtml(a.vol_delta_shares || '—')}</div>
         </td>
         <td>
@@ -1126,6 +1145,128 @@
       });
 
       tbody.appendChild(tr);
+    }
+  }
+
+  /* ------------------ HTF Liquidity Radar (BSL / SSL) ------------------ */
+  async function loadLiquidityRadar() {
+    const dateSelEl = document.getElementById('liquidity-date-select');
+    const statusSelEl = document.getElementById('liquidity-status-filter');
+    const selectedDate = dateSelEl?.value || '';
+    const selectedStatus = statusSelEl?.value || 'ALL';
+    const tbody = document.getElementById('liquidity-tbody');
+    if (!tbody) return;
+
+    try {
+      let url = selectedDate
+        ? `/api/liquidity/radar?trade_date=${encodeURIComponent(selectedDate)}`
+        : '/api/liquidity/radar';
+      if (selectedStatus && selectedStatus !== 'ALL') {
+        url += (url.includes('?') ? '&' : '?') + `outcome=${encodeURIComponent(selectedStatus)}`;
+      }
+      const data = await api(url);
+      const setups = data.setups || [];
+      // Ensure latest / newest setups and LIVE approaching alerts are displayed on top
+      setups.sort((a, b) => (b.epoch_ts || 0) - (a.epoch_ts || 0));
+      const avail = data.available_dates || [];
+
+      // Dynamically populate date dropdown if needed
+      if (dateSelEl && avail.length > 0) {
+        const curVal = dateSelEl.value;
+        const todayStr = data.today_date || '';
+        if (dateSelEl.options.length !== avail.length || (avail[0] && !dateSelEl.options[0]?.text.includes(avail[0]))) {
+          dateSelEl.innerHTML = avail
+            .map((d, idx) => {
+              let label;
+              if (d === todayStr) {
+                label = `Today (${d}) - LIVE 🟢`;
+              } else if (idx === 1 && avail[0] === todayStr) {
+                label = `Yesterday (${d})`;
+              } else {
+                label = `Historical (${d})`;
+              }
+              return `<option value="${d}">${label}</option>`;
+            })
+            .join('');
+          if (curVal && avail.includes(curVal)) {
+            dateSelEl.value = curVal;
+          } else {
+            dateSelEl.value = data.trade_date || avail[0];
+          }
+        }
+      }
+
+      const badge = document.getElementById('liquidity-count-badge');
+      if (badge) badge.textContent = `${setups.length} setups`;
+      const tabCount = document.getElementById('tab-liquidity-count');
+      if (tabCount) tabCount.textContent = setups.length;
+
+      if (!setups.length) {
+        const isToday = (data.trade_date === data.today_date);
+        const msg = isToday
+          ? `⚡ Today's Market Session (${escapeHtml(data.trade_date)}) is starting / LIVE. Point-in-time setups and proximity alerts will stream in automatically as 5m candles close.`
+          : `No liquidity setups found for ${escapeHtml(data.trade_date || selectedDate)} (Filter: ${escapeHtml(selectedStatus)}).`;
+        tbody.innerHTML = `<tr><td colspan="9" class="muted" style="text-align:center;padding:1.5rem;">${msg}</td></tr>`;
+        return;
+      }
+
+      tbody.innerHTML = '';
+      for (const s of setups) {
+        const tr = document.createElement('tr');
+        const isApproaching = s.setup_name.includes('Approaching');
+        const dirCls = s.direction.includes('LONG') ? 'tag-long' : s.direction.includes('SHORT') ? 'tag-short' : 'tag-neutral';
+        const setupCls = isApproaching ? 'badge-approaching' : (s.setup_name.includes('Sweep') ? 'badge-breakout' : 'badge-retest');
+        const lvlCls = getHtfBadgeClass(s.level_type);
+
+        tr.innerHTML = `
+          <td data-value="${s.epoch_ts || 0}"><span class="time-pill">${escapeHtml(s.trigger_time)}</span></td>
+          <td data-value="${escapeHtml(s.symbol)}">
+            <div><strong>${escapeHtml(s.symbol)}</strong> <span class="badge ${dirCls}">${escapeHtml(s.direction)}</span></div>
+          </td>
+          <td data-value="${s.level_price}">
+            <div><span class="badge ${lvlCls}">${escapeHtml(s.level_type)}</span></div>
+            <div class="muted" style="font-size:0.72rem;margin-top:0.2rem;">Level: ₹${Number(s.level_price).toLocaleString('en-IN', {minimumFractionDigits: 2})}</div>
+          </td>
+          <td data-value="${escapeHtml(s.setup_name)}">
+            <div><span class="badge ${setupCls}">${escapeHtml(s.setup_name)}</span></div>
+            ${s.candle_pattern ? `<div style="font-size:0.75rem;font-weight:600;color:#fcd34d;margin-top:0.25rem;">🕯️ ${escapeHtml(s.candle_pattern)}</div>` : ''}
+            <div class="muted" style="font-size:0.72rem;margin-top:0.15rem;">${escapeHtml(s.notes || '')}</div>
+          </td>
+          <td data-value="${s.entry_price}">
+            <div>Entry: <strong>₹${Number(s.entry_price).toLocaleString('en-IN', {minimumFractionDigits: 2})}</strong></div>
+            <div class="muted" style="font-size:0.72rem;color:#ef4444;">SL: ₹${Number(s.stop_loss).toLocaleString('en-IN', {minimumFractionDigits: 2})} (Risk: ${s.risk_pts} pts)</div>
+          </td>
+          <td data-value="${s.target_price}">
+            <div style="color:#10b981;font-weight:700;">₹${Number(s.target_price).toLocaleString('en-IN', {minimumFractionDigits: 2})}</div>
+            <div class="muted" style="font-size:0.72rem;">Reward: +${s.reward_pts} pts</div>
+          </td>
+          <td data-value="${s.current_pnl ?? 0}">
+            <div><span class="badge ${s.outcome_badge || 'badge-retest'}">${escapeHtml(s.outcome_label || s.outcome || 'Active')}</span></div>
+            ${s.outcome_time ? `<div class="muted" style="font-size:0.72rem;margin-top:0.2rem;">Hit: ${escapeHtml(s.outcome_time)}</div>` : ''}
+          </td>
+          <td data-value="${s.risk_pts > 0 ? (s.reward_pts / s.risk_pts) : 0}">
+            <div style="font-weight:700;color:#38bdf8;">${escapeHtml(s.rr_ratio)}</div>
+            <div class="muted" style="font-size:0.72rem;font-weight:600;color:#94a3b8;">${escapeHtml(s.volume_signature || `RVOL ${s.rvol}x`)}</div>
+          </td>
+          <td>
+            <div class="row-actions">
+              <button type="button" class="btn btn-ghost btn-sm btn-liq-oc" title="Inspect Option Chain and Strike Squeeze">Options</button>
+              <button type="button" class="btn btn-primary btn-sm btn-liq-chart" title="View 15m Chart">Chart</button>
+            </div>
+          </td>
+        `;
+
+        tr.querySelector('.btn-liq-oc').addEventListener('click', () => {
+          openOptionChainModal(s.symbol);
+        });
+        tr.querySelector('.btn-liq-chart').addEventListener('click', () => {
+          const matchSetup = state.setups.find((st) => st.symbol === s.symbol);
+          openChartModal(s.symbol, '15m', matchSetup);
+        });
+        tbody.appendChild(tr);
+      }
+    } catch (err) {
+      tbody.innerHTML = `<tr><td colspan="9" class="muted error">Failed to load liquidity radar: ${escapeHtml(err.message)}</td></tr>`;
     }
   }
 
@@ -1652,6 +1793,30 @@
         toast('Alert history cleared');
       }
     });
+
+    // HTF Liquidity Radar Controls
+    document.getElementById('liquidity-date-select')?.addEventListener('change', () => {
+      loadLiquidityRadar().catch((err) => toast(err.message));
+    });
+
+    document.getElementById('liquidity-status-filter')?.addEventListener('change', () => {
+      loadLiquidityRadar().catch((err) => toast(err.message));
+    });
+
+    document.getElementById('btn-refresh-liquidity')?.addEventListener('click', async () => {
+      const btn = document.getElementById('btn-refresh-liquidity');
+      btn.disabled = true;
+      btn.textContent = 'Scanning...';
+      try {
+        await loadLiquidityRadar();
+        toast('Liquidity Radar updated');
+      } catch (err) {
+        toast(err.message);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Refresh Radar';
+      }
+    });
   }
 
   async function boot() {
@@ -1662,6 +1827,7 @@
     initSortableTable('live-momentum-table', 'live-momentum-sort-status');
     initSortableTable('live-alerts-table', 'live-alerts-sort-status');
     initSortableTable('trades-table', 'trades-sort-status');
+    initSortableTable('liquidity-table', 'liquidity-sort-status');
     wireEvents();
 
     await Promise.allSettled([
@@ -1670,14 +1836,21 @@
       loadWatchlist(),
       loadLiveMomentum(),
       loadLiveAlerts(),
+      loadLiquidityRadar(),
       loadPortfolio(),
       loadUniverse(),
     ]);
 
-    // Periodic Live Alert & Momentum Poller (every 18 seconds)
+    // Periodic Live Alert, Momentum & Liquidity Poller (every 18 seconds)
     setInterval(async () => {
       try {
         await loadLiveAlerts();
+        // Auto-refresh liquidity radar in live market if viewing default / latest date
+        const dateSel = document.getElementById('liquidity-date-select');
+        const defaultDate = dateSel?.options[0]?.value;
+        if (!dateSel || !dateSel.value || dateSel.value === defaultDate) {
+          await loadLiquidityRadar();
+        }
       } catch {
         // silent background check
       }

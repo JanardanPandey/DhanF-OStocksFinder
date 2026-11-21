@@ -284,7 +284,7 @@ async def get_live_alerts_feed(
         if ev_u == "BREAKOUTS":
             alerts = [a for a in alerts if a.get("event_type") in ("OB_BREAKOUT", "MOMENTUM_EXPANSION")]
         elif ev_u == "EXITS":
-            alerts = [a for a in alerts if a.get("event_type") in ("TARGET_R1_HIT", "INVALIDATION_EXIT")]
+            alerts = [a for a in alerts if "EXIT" in str(a.get("event_type", "")) or a.get("event_type") == "TARGET_R1_HIT"]
         elif ev_u == "SMC":
             alerts = [
                 a
@@ -306,6 +306,29 @@ async def get_live_alerts_feed(
 async def clear_live_alerts(trade_date: str | None = Query(default=None)) -> dict[str, Any]:
     db.clear_live_alerts(trade_date=trade_date)
     return {"ok": True, "message": "Live alerts cleared"}
+
+
+@app.get("/api/liquidity/radar")
+async def get_liquidity_radar(
+    trade_date: str | None = Query(default=None),
+    min_rr: float = Query(default=2.0),
+    min_reward_pts: float = Query(default=10.0),
+    outcome: str | None = Query(default=None),
+) -> dict[str, Any]:
+    from app.liquidity_engine import scan_point_in_time_liquidity_setups, get_available_liquidity_dates
+    from datetime import datetime, timezone, timedelta
+    avail = get_available_liquidity_dates()
+    today_ist = datetime.now(timezone(timedelta(hours=5, minutes=30))).date().isoformat()
+    d = trade_date or (today_ist if today_ist in avail else (avail[0] if avail else today_ist))
+    setups = scan_point_in_time_liquidity_setups(d, min_rr=min_rr, min_reward_pts=min_reward_pts, outcome_filter=outcome)
+    return {
+        "ok": True,
+        "trade_date": str(d),
+        "today_date": today_ist,
+        "available_dates": avail,
+        "count": len(setups),
+        "setups": setups,
+    }
 
 
 @app.get("/api/option-chain/{symbol}")

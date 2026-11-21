@@ -57,7 +57,10 @@
           T-1 Watchlist (<span id="tab-watchlist-count">0</span>)
         </button>
         <button type="button" role="tab" id="tab-alerts" aria-selected="false" tabindex="-1" data-panel="panel-alerts">
-          🔴 Live Alerts (<span id="tab-alerts-count">0</span>)
+          🔴 Live F&amp;O Signals (<span id="tab-alerts-count">0</span>)
+        </button>
+        <button type="button" role="tab" id="tab-liquidity" aria-selected="false" tabindex="-1" data-panel="panel-liquidity">
+          🎯 HTF Liquidity Radar (<span id="tab-liquidity-count">0</span>)
         </button>
         <button type="button" role="tab" id="tab-paper" aria-selected="false" tabindex="-1" data-panel="panel-paper">
           Paper Portfolio (<span id="tab-open-count">0</span>)
@@ -387,8 +390,8 @@
           <div class="card">
             <div class="card-header">
               <div>
-                <h2 id="live-alerts-caption">🔴 Live Market Trigger Alerts (Append-Only Chronological Timeline)</h2>
-                <p class="muted">Never overwritten — every trigger time, Order Block breakout, target hit, and call unwinding squeeze is permanently preserved.</p>
+                <h2 id="live-alerts-caption">🔴 Live F&amp;O Option Signals &amp; Execution Log</h2>
+                <p class="muted">Actionable Option Execution · Real-Time CE/PE Strikes, Estimated Premium &amp; 1-Lot Capital · Target R1 &amp; Fast Risk Exits (Newest On Top).</p>
               </div>
               <div class="row-actions">
                 <button type="button" id="btn-toggle-sound" class="btn btn-ghost btn-sm" aria-pressed="true">
@@ -424,7 +427,7 @@
                 <caption class="sr-only">Live Market Trigger Alert Timeline</caption>
                 <thead>
                   <tr>
-                    <th scope="col" data-type="text"><button type="button" class="sort-btn">Trigger Time <span aria-hidden="true" class="sort-icon"></span></button></th>
+                    <th scope="col" data-type="number" aria-sort="descending"><button type="button" class="sort-btn">Trigger Time <span aria-hidden="true" class="sort-icon"></span></button></th>
                     <th scope="col" data-type="text"><button type="button" class="sort-btn">Symbol &amp; Bias <span aria-hidden="true" class="sort-icon"></span></button></th>
                     <th scope="col" data-type="text"><button type="button" class="sort-btn">Event Catalyst <span aria-hidden="true" class="sort-icon"></span></button></th>
                     <th scope="col" data-type="number"><button type="button" class="sort-btn">Price &amp; Move <span aria-hidden="true" class="sort-icon"></span></button></th>
@@ -438,6 +441,60 @@
               </table>
             </div>
             <div id="live-alerts-sort-status" role="status" class="sr-only"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- PANEL 6: HTF LIQUIDITY RADAR (BSL & SSL) -->
+      <section role="tabpanel" id="panel-liquidity" aria-labelledby="tab-liquidity" class="tabpanel" hidden>
+        <div class="panel-body">
+          <div class="card">
+            <div class="card-header">
+              <div>
+                <h2 id="liquidity-caption">🎯 HTF Liquidity Radar (Daily &amp; Weekly BSL / SSL)</h2>
+                <p class="muted">Macro Liquidity Pools · Pre-Breakout Proximity Radar (⚡ Approaching) · Point-in-Time Scanner &amp; All-Day Replay (Newest On Top).</p>
+              </div>
+              <div class="row-actions">
+                <div class="filter-group">
+                  <label for="liquidity-date-select">Trade Date</label>
+                  <select id="liquidity-date-select">
+                    <option value="2026-11-18" selected>Today (18-Nov-2026)</option>
+                    <option value="2026-11-17">Yesterday (17-Nov-2026)</option>
+                  </select>
+                </div>
+                <div class="filter-group">
+                  <label for="liquidity-status-filter">Status</label>
+                  <select id="liquidity-status-filter">
+                    <option value="ALL" selected>All Setups</option>
+                    <option value="ACTIVE">⚡ Active &amp; Approaching</option>
+                    <option value="TARGET_HIT">🎯 Target Hit</option>
+                    <option value="STOPPED_OUT">❌ Stopped Out</option>
+                  </select>
+                </div>
+                <button type="button" id="btn-refresh-liquidity" class="btn btn-primary btn-sm">Refresh Radar</button>
+                <span id="liquidity-count-badge" class="badge">0 setups</span>
+              </div>
+            </div>
+            <div tabindex="0" role="region" aria-labelledby="liquidity-caption" class="table-wrapper table-wrapper-scroll">
+              <table id="liquidity-table" class="data-table">
+                <caption class="sr-only">HTF Liquidity BSL and SSL Setups</caption>
+                <span id="liquidity-sort-status" class="sr-only" aria-live="polite"></span>
+                <thead>
+                  <tr>
+                    <th scope="col" data-type="number" aria-sort="descending"><button type="button" class="sort-btn">Trigger Time <span aria-hidden="true" class="sort-icon"></span></button></th>
+                    <th scope="col" data-type="text"><button type="button" class="sort-btn">Symbol &amp; Dir <span aria-hidden="true" class="sort-icon"></span></button></th>
+                    <th scope="col" data-type="text"><button type="button" class="sort-btn">HTF Level &amp; Price <span aria-hidden="true" class="sort-icon"></span></button></th>
+                    <th scope="col" data-type="text"><button type="button" class="sort-btn">Setup Confirmation <span aria-hidden="true" class="sort-icon"></span></button></th>
+                    <th scope="col" data-type="number"><button type="button" class="sort-btn">Entry &amp; SL <span aria-hidden="true" class="sort-icon"></span></button></th>
+                    <th scope="col" data-type="number"><button type="button" class="sort-btn">Target (Opposite) <span aria-hidden="true" class="sort-icon"></span></button></th>
+                    <th scope="col" data-type="number"><button type="button" class="sort-btn">Current Outcome &amp; P&amp;L <span aria-hidden="true" class="sort-icon"></span></button></th>
+                    <th scope="col" data-type="text"><button type="button" class="sort-btn">Reward / Risk <span aria-hidden="true" class="sort-icon"></span></button></th>
+                    <th scope="col">Action</th>
+                  </tr>
+                </thead>
+                <tbody id="liquidity-tbody"></tbody>
+              </table>
+            </div>
           </div>
         </div>
       </section>

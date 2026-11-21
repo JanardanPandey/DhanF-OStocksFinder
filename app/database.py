@@ -214,6 +214,10 @@ class Database:
                     ON live_alerts(symbol, trade_date);
                 """
             )
+            try:
+                conn.execute("ALTER TABLE candles ADD COLUMN oi REAL DEFAULT 0")
+            except Exception:
+                pass
             row = conn.execute("SELECT id FROM account_state WHERE id = 1").fetchone()
             if row is None:
                 conn.execute(
@@ -310,8 +314,8 @@ class Database:
         with self.connect() as conn:
             conn.executemany(
                 """
-                INSERT OR REPLACE INTO candles (symbol, timeframe, ts, open, high, low, close, volume)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT OR REPLACE INTO candles (symbol, timeframe, ts, open, high, low, close, volume, oi)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
@@ -323,6 +327,7 @@ class Database:
                         float(r["low"]),
                         float(r["close"]),
                         float(r["volume"]),
+                        float(r.get("oi") or 0.0),
                     )
                     for r in rows
                 ],
@@ -332,7 +337,7 @@ class Database:
         with self.connect() as conn:
             rows = conn.execute(
                 """
-                SELECT ts, open, high, low, close, volume
+                SELECT ts, open, high, low, close, volume, COALESCE(oi, 0) as oi
                 FROM candles
                 WHERE symbol = ? AND timeframe = ?
                 ORDER BY ts DESC

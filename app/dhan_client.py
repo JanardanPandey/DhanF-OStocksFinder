@@ -360,7 +360,7 @@ class DhanClient:
                                 "exchangeSegment": "NSE_EQ",
                                 "instrument": "EQUITY",
                                 "expiryCode": 0,
-                                "oi": False,
+                                "oi": True,
                                 "fromDate": from_dt,
                                 "toDate": to_dt,
                             },
@@ -379,7 +379,7 @@ class DhanClient:
                                 "exchangeSegment": "NSE_EQ",
                                 "instrument": "EQUITY",
                                 "interval": interval,
-                                "oi": False,
+                                "oi": True,
                                 "fromDate": from_dt,
                                 "toDate": to_dt,
                             },
@@ -401,6 +401,9 @@ class DhanClient:
         ts = data.get("timestamp") or []
         if not ts:
             return pd.DataFrame()
+        n = len(ts)
+        raw_oi = data.get("oi") or []
+        oi_vals = [float(x) for x in raw_oi] if len(raw_oi) == n else [0.0] * n
         df = pd.DataFrame(
             {
                 "ts": [int(t) for t in ts],
@@ -409,6 +412,7 @@ class DhanClient:
                 "low": [float(x) for x in data.get("low", [])],
                 "close": [float(x) for x in data.get("close", [])],
                 "volume": [float(x) for x in data.get("volume", [])],
+                "oi": oi_vals,
             }
         )
         return df.drop_duplicates(subset=["ts"]).sort_values("ts").reset_index(drop=True)

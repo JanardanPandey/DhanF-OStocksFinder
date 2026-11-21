@@ -996,6 +996,85 @@ dialog.chart-dialog .setup-detail-box {
   border: 1px solid rgba(14, 165, 233, 0.45);
 }
 
+.badge-target-hit {
+  background: rgba(16, 185, 129, 0.22);
+  color: #34d399;
+  border: 1px solid rgba(16, 185, 129, 0.6);
+  font-weight: 700;
+}
+
+.badge-stopped-out {
+  background: rgba(239, 68, 68, 0.2);
+  color: #f87171;
+  border: 1px solid rgba(239, 68, 68, 0.5);
+  font-weight: 700;
+}
+
+.badge-running-pos {
+  background: rgba(6, 182, 212, 0.2);
+  color: #38bdf8;
+  border: 1px solid rgba(6, 182, 212, 0.5);
+  font-weight: 700;
+}
+
+.badge-running-neg {
+  background: rgba(245, 158, 11, 0.2);
+  color: #fbbf24;
+  border: 1px solid rgba(245, 158, 11, 0.5);
+  font-weight: 700;
+}
+
+.badge-approaching {
+  background: rgba(234, 179, 8, 0.25);
+  color: #fef08a;
+  border: 1px solid rgba(234, 179, 8, 0.6);
+  font-weight: 700;
+}
+
+.badge-pattern {
+  background: rgba(139, 92, 246, 0.22);
+  color: #c4b5fd;
+  border: 1px solid rgba(139, 92, 246, 0.5);
+  font-size: 0.68rem;
+  font-weight: 600;
+  display: inline-block;
+  padding: 0.15rem 0.45rem;
+  border-radius: 4px;
+}
+
+/* 4-Tier Institutional Liquidity Badges */
+.badge-lvl-daily {
+  background: rgba(56, 189, 248, 0.18);
+  color: #38bdf8;
+  border: 1px solid rgba(56, 189, 248, 0.45);
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+.badge-lvl-weekly {
+  background: rgba(168, 85, 247, 0.20);
+  color: #c084fc;
+  border: 1px solid rgba(168, 85, 247, 0.5);
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+.badge-lvl-swing {
+  background: rgba(245, 158, 11, 0.20);
+  color: #fbbf24;
+  border: 1px solid rgba(245, 158, 11, 0.5);
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+.badge-lvl-oi {
+  background: rgba(244, 63, 94, 0.20);
+  color: #fb7185;
+  border: 1px solid rgba(244, 63, 94, 0.5);
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
 /* Time Pill */
 .time-pill {
   font-family: monospace;

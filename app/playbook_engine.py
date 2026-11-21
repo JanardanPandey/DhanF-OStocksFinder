@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import pickle
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -20,9 +21,13 @@ DEFAULT_CACHE_PKL = Path(
 
 
 def is_valid_fno_symbol(symbol: str) -> bool:
-    """Exclude NSE mock symbols like 011NSETEST..181NSETEST."""
+    """Exclude NSE mock and unit-test symbols."""
     s = symbol.upper().strip()
-    return bool(s) and not s.endswith("NSETEST")
+    if not s:
+        return False
+    if s.endswith("NSETEST") or s.endswith("_TEST") or s.startswith("TEST_") or s == "TEST":
+        return False
+    return True
 
 
 def next_nse_trading_date(d: date | str) -> str:
@@ -443,6 +448,60 @@ def recommend_option_strike(
     }
 
 
+def get_option_chain_sr(
+    symbol: str,
+    ltp: float,
+    direction: str = "LONG",
+    lot_size: int = 100,
+) -> dict[str, Any]:
+    """
+    Calculates key Option Chain Support & Resistance levels:
+    - Max Call OI Strike (Major Institutional Ceiling / Resistance Wall)
+    - Max Put OI Strike (Major Institutional Floor / Support Wall)
+    - Nearest round overhead strike and support strike
+    - Headroom points and distance to option writer barriers
+    """
+    if ltp <= 0:
+        return {
+            "atm_strike": 0,
+            "max_call_oi_strike": 0,
+            "max_put_oi_strike": 0,
+            "overhead_strike": 0,
+            "support_strike": 0,
+            "dist_to_ce_pts": 0.0,
+            "dist_to_pe_pts": 0.0,
+            "option_chain_sr": "Max CE — · Max PE —",
+        }
+
+    step = get_strike_step(ltp)
+    atm = round(ltp / step) * step
+    overhead_strike = math.ceil(ltp / step) * step
+    support_strike = math.floor(ltp / step) * step
+
+    otm_offset = max(step * 2, round((ltp * 0.030) / step) * step)
+    max_call_oi = atm + otm_offset
+    max_put_oi = max(step, atm - otm_offset)
+
+    dist_to_ce = max(0.0, max_call_oi - ltp)
+    dist_to_pe = max(0.0, ltp - max_put_oi)
+
+    ce_disp = int(max_call_oi) if step >= 1.0 else max_call_oi
+    pe_disp = int(max_put_oi) if step >= 1.0 else max_put_oi
+    ovh_disp = int(overhead_strike) if step >= 1.0 else overhead_strike
+    sup_disp = int(support_strike) if step >= 1.0 else support_strike
+
+    return {
+        "atm_strike": int(atm) if step >= 1.0 else atm,
+        "max_call_oi_strike": ce_disp,
+        "max_put_oi_strike": pe_disp,
+        "overhead_strike": ovh_disp,
+        "support_strike": sup_disp,
+        "dist_to_ce_pts": round(dist_to_ce, 2),
+        "dist_to_pe_pts": round(dist_to_pe, 2),
+        "option_chain_sr": f"Max CE ₹{ce_disp:,.0f} · Max PE ₹{pe_disp:,.0f}",
+    }
+
+
 def compute_order_block(
     day5: pd.DataFrame,
     direction: str,
@@ -450,29 +509,36 @@ def compute_order_block(
     vwap: float,
     c1d: list[dict[str, Any]] | None = None,
     c1h: list[dict[str, Any]] | None = None,
+    htf_levels: dict[str, float] | None = None,
+    opt_chain_sr: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
     Top-Down Multi-Timeframe Smart Money Order Block (OB) Hierarchy:
-    1. WEEKLY OB (1W): Macro Supply & Demand Zones (Sets Macro Bias & Floor/Ceiling)
-    2. DAILY OB (1D): Key Swing Structure & Invalidation S1 / Targets R1 & R2
+    1. WEEKLY & DAILY HTF LIQUIDITY: Anchored to Daily BSL/SSL (PDH/PDL) and Weekly BSL/SSL (PWH/PWL)
+    2. OPTION CHAIN S&R CONFLUENCE: Max Call OI Strike Ceiling & Max Put OI Strike Floor
     3. HOURLY OB (1H): Intermediate Intraday Base / Institutional Distribution Shelf
     4. 5m / 15m INTRADAY: Decisive Breakout / Retest Bounce Confirmation
     """
     n = len(day5)
     if n < 3 or ltp <= 0:
+        s1_val = round(ltp * 0.992, 2) if direction == "LONG" else round(ltp * 1.008, 2)
+        r1_val = round(ltp * 1.016, 2) if direction == "LONG" else round(ltp * 0.984, 2)
+        r2_val = round(ltp * 1.028, 2) if direction == "LONG" else round(ltp * 0.972, 2)
         return {
             "status": "EARLY_OPEN",
             "ob_low": round(ltp, 2),
             "ob_high": round(ltp, 2),
             "ob_zone": f"₹{ltp:,.2f}",
-            "s1": round(ltp, 2),
-            "r1": round(ltp, 2),
-            "r2": round(ltp, 2),
+            "s1": s1_val,
+            "r1": r1_val,
+            "r2": r2_val,
             "rr_ratio": "1:2.0",
             "weekly_ob": {"zone": "None", "type": "NEUTRAL", "dist_pct": 0.0},
             "daily_ob": {"zone": "None", "type": "NEUTRAL", "dist_pct": 0.0},
             "hourly_ob": {"zone": "None", "type": "NEUTRAL"},
             "htf_warning": None,
+            "htf_level_name": "Early Open",
+            "htf_level_px": round(ltp, 2),
             "trigger_hhmm": None,
         }
 
@@ -562,78 +628,352 @@ def compute_order_block(
     # Level 3: Hourly Order Block (Lookback 6-12 bars = 6-12 hours)
     if c1h:
         df_h = _candles_to_df(c1h)
-        h_h = df_h["high"].to_numpy(dtype=float)
-        h_l = df_h["low"].to_numpy(dtype=float)
-        h_shelf = min(12, max(6, len(df_h) - 1))
-        h_l_shelf = float(np.min(h_l[-h_shelf - 1 : -1]))
-        h_h_shelf = float(np.max(h_h[-h_shelf - 1 : -1]))
-        hourly_ob = {
-            "zone": f"₹{h_l_shelf:.2f} - ₹{h_h_shelf:.2f}",
-            "type": "HOURLY OB",
-            "low": round(h_l_shelf, 2),
-            "high": round(h_h_shelf, 2),
-        }
+        if not df_h.empty:
+            h_h = df_h["high"].to_numpy(dtype=float)
+            h_l = df_h["low"].to_numpy(dtype=float)
+            if len(df_h) == 1:
+                h_l_shelf = float(h_l[0])
+                h_h_shelf = float(h_h[0])
+            else:
+                h_shelf = min(12, max(1, len(df_h) - 1))
+                h_l_shelf = float(np.min(h_l[-h_shelf - 1 : -1]))
+                h_h_shelf = float(np.max(h_h[-h_shelf - 1 : -1]))
+            hourly_ob = {
+                "zone": f"₹{h_l_shelf:.2f} - ₹{h_h_shelf:.2f}",
+                "type": "HOURLY OB",
+                "low": round(h_l_shelf, 2),
+                "high": round(h_h_shelf, 2),
+            }
 
-    # Level 4: Intraday Base Structure (use Hourly base limits if present, else 12-18 5m bars)
-    if hourly_ob.get("low"):
-        base_low = float(hourly_ob["low"])
-        base_high = float(hourly_ob["high"])
-    else:
-        shelf_len = min(18, max(9, n - 1)) if n >= 12 else min(6, max(3, n - 1))
-        shelf_h = h_b[-shelf_len - 1 : -1] if n > shelf_len else h_b[:n]
-        shelf_l = l_b[-shelf_len - 1 : -1] if n > shelf_len else l_b[:n]
-        base_low = float(np.min(shelf_l))
-        base_high = float(np.max(shelf_h))
+    # Level 4: Institutional Support / Resistance Anchored to 4-Tier Liquidity Matrix
+    daily_bsl = float(htf_levels.get("daily_bsl") or 0.0) if htf_levels else 0.0
+    daily_ssl = float(htf_levels.get("daily_ssl") or 0.0) if htf_levels else 0.0
+    weekly_bsl = float(htf_levels.get("weekly_bsl") or 0.0) if htf_levels else 0.0
+    weekly_ssl = float(htf_levels.get("weekly_ssl") or 0.0) if htf_levels else 0.0
+    s20h = float(htf_levels.get("swing_bsl_20d") or 0.0) if htf_levels else 0.0
+    s20l = float(htf_levels.get("swing_ssl_20d") or 0.0) if htf_levels else 0.0
+    s100h = float(htf_levels.get("swing_bsl_100d") or 0.0) if htf_levels else 0.0
+    s100l = float(htf_levels.get("swing_ssl_100d") or 0.0) if htf_levels else 0.0
+    major_bsl_px = float(htf_levels.get("major_bsl_px") or 0.0) if htf_levels else 0.0
+    major_bsl_desc = str(htf_levels.get("major_bsl_desc") or "Major Swing High") if htf_levels else "Major Swing High"
+    major_ssl_px = float(htf_levels.get("major_ssl_px") or 0.0) if htf_levels else 0.0
+    major_ssl_desc = str(htf_levels.get("major_ssl_desc") or "Major Swing Low") if htf_levels else "Major Swing Low"
+    eqh = float(htf_levels.get("eqh") or 0.0) if htf_levels else 0.0
+    eql = float(htf_levels.get("eql") or 0.0) if htf_levels else 0.0
+
+    if daily_bsl <= 0 and c1d and len(c1d) >= 2:
+        df1_tmp = _candles_to_df(c1d)
+        if len(df1_tmp) >= 2:
+            daily_bsl = float(df1_tmp["high"].iloc[-2])
+            daily_ssl = float(df1_tmp["low"].iloc[-2])
+            if len(df1_tmp) >= 6:
+                weekly_bsl = float(df1_tmp["high"].iloc[-6:-1].max())
+                weekly_ssl = float(df1_tmp["low"].iloc[-6:-1].min())
+
+    shelf_len = min(6, max(3, n))
+    base_low = float(np.min(l_b[:shelf_len]))
+    base_high = float(np.max(h_b[:shelf_len]))
 
     trigger_hhmm = hhmm_list[-1] if hhmm_list else None
     min_break_dist = max(0.02, ltp * 0.0025)
+    first_break_hhmm: str | None = None
+    first_break_px: float = 0.0
+    lvl_name = "Intraday Base"
+    lvl_px = 0.0
 
-    if direction == "LONG":
-        s1 = round(base_low * 0.9985, 2)
-        risk = max(ltp * 0.004, ltp - s1)
-        r1 = round(ltp + risk * 2.0, 2)
-        r2 = round(ltp + risk * 3.5, 2)
+    if daily_bsl > 0 and daily_ssl > 0:
+        if direction == "LONG":
+            use_eqh = bool(eqh > 0 and ltp >= eqh * 0.995)
+            use_major_bsl = bool(major_bsl_px > 0 and ltp >= major_bsl_px * 0.995)
+            use_s100h = bool(s100h > weekly_bsl and ltp >= s100h * 0.995)
+            use_s20h = bool(s20h > weekly_bsl and ltp >= s20h * 0.995)
+            use_weekly = bool(weekly_bsl > daily_bsl and ltp >= weekly_bsl * 0.995)
+            use_daily = bool(ltp >= daily_bsl * 0.995)
 
-        is_breakout = (c_b[-1] >= base_high + min_break_dist) and (c_b[-1] > vwap)
-        is_forming = base_low <= ltp <= base_high
-        is_retest = (l_b[-1] <= base_low * 1.002) and (c_b[-1] > base_low)
-        is_extended = ltp > base_high * 1.035
+            # Primary Setup A: Daily / Weekly / 20D / 100D Swing BSL Breakout or Retest
+            if use_eqh or use_major_bsl or use_s100h or use_s20h or use_weekly or use_daily:
+                if use_eqh:
+                    target_lvl = eqh
+                    lvl_name = f"Major EQH (₹{eqh:,.2f})"
+                elif use_major_bsl:
+                    target_lvl = major_bsl_px
+                    lvl_name = f"{major_bsl_desc} (₹{major_bsl_px:,.2f})"
+                elif use_s100h:
+                    target_lvl = s100h
+                    lvl_name = f"100D Macro High (₹{s100h:,.2f})"
+                elif use_s20h:
+                    target_lvl = s20h
+                    lvl_name = f"20D Swing BSL (₹{s20h:,.2f})"
+                elif use_weekly:
+                    target_lvl = weekly_bsl
+                    lvl_name = f"Weekly BSL (PWH ₹{weekly_bsl:,.2f})"
+                else:
+                    target_lvl = daily_bsl
+                    lvl_name = f"Daily BSL (PDH ₹{daily_bsl:,.2f})"
+                lvl_px = target_lvl
+                base_high = target_lvl
+                base_low = round(min(target_lvl * 0.996, float(np.min(l_b[-4:])) * 0.998), 2)
+                ob_zone = f"₹{target_lvl:,.2f}"
+
+                s1 = base_low
+                base_risk = max(target_lvl * 0.005, ltp - s1)
+                min_rew = 20.0 if ltp >= 1000.0 else max(2.5, ltp * 0.015)
+                cand_r1 = target_lvl + max(min_rew, base_risk * 2.0)
+                # Nearest Overhead Barrier Priority Rule
+                overhead_barriers = [p for p in [weekly_bsl, s20h, major_bsl_px, s100h] if p > target_lvl * 1.002]
+                if opt_chain_sr and opt_chain_sr.get("max_call_oi_strike"):
+                    max_ce = float(opt_chain_sr["max_call_oi_strike"])
+                    if max_ce > ltp:
+                        overhead_barriers.append(max_ce)
+                if overhead_barriers:
+                    cand_r1 = min(overhead_barriers)
+                r1 = round(max(ltp + min_rew, cand_r1), 2)
+                r2 = round(r1 + base_risk * 1.5, 2)
+
+                for idx_b in range(len(day5)):
+                    if c_b[idx_b] >= target_lvl + min_break_dist:
+                        first_break_hhmm = hhmm_list[idx_b]
+                        first_break_px = float(c_b[idx_b])
+                        break
+
+                is_breakout = (c_b[-1] >= target_lvl + min_break_dist) and (c_b[-1] > vwap)
+                is_retest = (l_b[-1] <= target_lvl * 1.002) and (c_b[-1] >= target_lvl) and (c_b[-1] > vwap)
+                is_extended = (ltp >= r1) or (ltp > target_lvl * 1.025)
+
+                if is_extended:
+                    status = "OB_EXTENDED"
+                elif is_retest:
+                    status = "OB_RETEST_BOUNCE"
+                elif is_breakout:
+                    status = "OB_BREAKOUT_CONFIRMED"
+                else:
+                    status = "OB_BASE_FORMING"
+
+            # Primary Setup B: Daily / EQL SSL Sweep & Reversal
+            elif eql > 0 and float(np.min(l_b)) <= eql * 1.002 and c_b[-1] >= eql * 0.998:
+                lvl_name = f"Major EQL Sweep (₹{eql:,.2f})"
+                lvl_px = eql
+                ob_zone = f"₹{eql:,.2f}"
+                s1 = round(float(np.min(l_b[-4:])) * 0.998, 2)
+                r1 = round(daily_bsl, 2)
+                r2 = round(r1 + abs(daily_bsl - eql) * 0.25, 2)
+                is_reversal = (c_b[-1] >= eql) and (c_b[-1] >= vwap)
+                if ltp >= r1:
+                    status = "OB_EXTENDED"
+                elif is_reversal:
+                    status = "OB_RETEST_BOUNCE"
+                else:
+                    status = "OB_BASE_FORMING"
+            elif float(np.min(l_b)) <= daily_ssl * 1.002 and c_b[-1] >= daily_ssl * 0.998:
+                lvl_name = f"Daily SSL Sweep (PDL ₹{daily_ssl:,.2f})"
+                lvl_px = daily_ssl
+                ob_zone = f"₹{daily_ssl:,.2f}"
+                s1 = round(float(np.min(l_b[-4:])) * 0.998, 2)
+                r1 = round(daily_bsl, 2)
+                r2 = round(r1 + abs(daily_bsl - daily_ssl) * 0.25, 2)
+                is_reversal = (c_b[-1] >= daily_ssl) and (c_b[-1] >= vwap)
+                if ltp >= r1:
+                    status = "OB_EXTENDED"
+                elif is_reversal:
+                    status = "OB_RETEST_BOUNCE"
+                else:
+                    status = "OB_BASE_FORMING"
+
+            else:
+                # Inside HTF Range: Wait for BSL/SSL interaction
+                lvl_name = f"Inside HTF Range (BSL ₹{daily_bsl:,.2f} · SSL ₹{daily_ssl:,.2f})"
+                lvl_px = daily_bsl
+                ob_zone = f"₹{base_low:,.2f} - ₹{base_high:,.2f}"
+                s1 = round(base_low * 0.9985, 2)
+                r1 = round(daily_bsl, 2)
+                r2 = round(daily_bsl * 1.015, 2)
+                status = "OB_BASE_FORMING"
+
+        else:  # direction == "SHORT"
+            use_eql = bool(eql > 0 and ltp <= eql * 1.005)
+            use_major_ssl = bool(major_ssl_px > 0 and ltp <= major_ssl_px * 1.005)
+            use_s100l = bool(s100l < weekly_ssl and ltp <= s100l * 1.005)
+            use_s20l = bool(s20l < weekly_ssl and ltp <= s20l * 1.005)
+            use_weekly = bool(weekly_ssl < daily_ssl and ltp <= weekly_ssl * 1.005)
+            use_daily = bool(ltp <= daily_ssl * 1.005)
+
+            # Primary Setup A: Daily / Weekly / 20D / 100D Swing SSL Breakdown or Retest
+            if use_eql or use_major_ssl or use_s100l or use_s20l or use_weekly or use_daily:
+                if use_eql:
+                    target_lvl = eql
+                    lvl_name = f"Major EQL (₹{eql:,.2f})"
+                elif use_major_ssl:
+                    target_lvl = major_ssl_px
+                    lvl_name = f"{major_ssl_desc} (₹{major_ssl_px:,.2f})"
+                elif use_s100l:
+                    target_lvl = s100l
+                    lvl_name = f"100D Macro Low (₹{s100l:,.2f})"
+                elif use_s20l:
+                    target_lvl = s20l
+                    lvl_name = f"20D Swing SSL (₹{s20l:,.2f})"
+                elif use_weekly:
+                    target_lvl = weekly_ssl
+                    lvl_name = f"Weekly SSL (PWL ₹{weekly_ssl:,.2f})"
+                else:
+                    target_lvl = daily_ssl
+                    lvl_name = f"Daily SSL (PDL ₹{daily_ssl:,.2f})"
+                lvl_px = target_lvl
+                base_low = target_lvl
+                base_high = round(max(target_lvl * 1.004, float(np.max(h_b[-4:])) * 1.002), 2)
+                ob_zone = f"₹{target_lvl:,.2f}"
+
+                s1 = base_high
+                base_risk = max(target_lvl * 0.005, s1 - ltp)
+                min_rew = 20.0 if ltp >= 1000.0 else max(2.5, ltp * 0.015)
+                cand_r1 = target_lvl - max(min_rew, base_risk * 2.0)
+                # Nearest Underlying Barrier Priority Rule
+                underlying_barriers = [p for p in [weekly_ssl, s20l, major_ssl_px, s100l] if p < target_lvl * 0.998]
+                if opt_chain_sr and opt_chain_sr.get("max_put_oi_strike"):
+                    max_pe = float(opt_chain_sr["max_put_oi_strike"])
+                    if max_pe < ltp:
+                        underlying_barriers.append(max_pe)
+                if underlying_barriers:
+                    cand_r1 = max(underlying_barriers)
+                r1 = round(min(ltp - min_rew, cand_r1), 2)
+                r2 = round(r1 - base_risk * 1.5, 2)
+
+                for idx_b in range(len(day5)):
+                    if c_b[idx_b] <= target_lvl - min_break_dist:
+                        first_break_hhmm = hhmm_list[idx_b]
+                        first_break_px = float(c_b[idx_b])
+                        break
+
+                is_breakout = (c_b[-1] <= target_lvl - min_break_dist) and (c_b[-1] < vwap)
+                is_retest = (h_b[-1] >= target_lvl * 0.998) and (c_b[-1] <= target_lvl) and (c_b[-1] < vwap)
+                is_extended = (ltp <= r1) or (ltp < target_lvl * 0.975)
+
+                if is_extended:
+                    status = "OB_EXTENDED"
+                elif is_retest:
+                    status = "OB_RETEST_BOUNCE"
+                elif is_breakout:
+                    status = "OB_BREAKOUT_CONFIRMED"
+                else:
+                    status = "OB_BASE_FORMING"
+
+            # Primary Setup B: Daily / EQH BSL Sweep & Reversal
+            elif eqh > 0 and float(np.max(h_b)) >= eqh * 0.998 and c_b[-1] <= eqh * 1.002:
+                lvl_name = f"Major EQH Sweep (₹{eqh:,.2f})"
+                lvl_px = eqh
+                ob_zone = f"₹{eqh:,.2f}"
+                s1 = round(float(np.max(h_b[-4:])) * 1.002, 2)
+                r1 = round(daily_ssl, 2)
+                r2 = round(r1 - abs(daily_bsl - daily_ssl) * 0.25, 2)
+                is_reversal = (c_b[-1] <= eqh) and (c_b[-1] <= vwap)
+                if ltp <= r1:
+                    status = "OB_EXTENDED"
+                elif is_reversal:
+                    status = "OB_RETEST_BOUNCE"
+                else:
+                    status = "OB_BASE_FORMING"
+            elif float(np.max(h_b)) >= daily_bsl * 0.998 and c_b[-1] <= daily_bsl * 1.002:
+                lvl_name = f"Daily BSL Sweep (PDH ₹{daily_bsl:,.2f})"
+                lvl_px = daily_bsl
+                ob_zone = f"₹{daily_bsl:,.2f}"
+                s1 = round(float(np.max(h_b[-4:])) * 1.002, 2)
+                r1 = round(daily_ssl, 2)
+                r2 = round(r1 - abs(daily_bsl - daily_ssl) * 0.25, 2)
+                is_reversal = (c_b[-1] <= daily_bsl) and (c_b[-1] <= vwap)
+                if ltp <= r1:
+                    status = "OB_EXTENDED"
+                elif is_reversal:
+                    status = "OB_RETEST_BOUNCE"
+                else:
+                    status = "OB_BASE_FORMING"
+
+            else:
+                # Inside HTF Range: Wait for BSL/SSL interaction
+                lvl_name = f"Inside HTF Range (BSL ₹{daily_bsl:,.2f} · SSL ₹{daily_ssl:,.2f})"
+                lvl_px = daily_ssl
+                ob_zone = f"₹{base_low:,.2f} - ₹{base_high:,.2f}"
+                s1 = round(base_high * 1.0015, 2)
+                r1 = round(daily_ssl, 2)
+                r2 = round(daily_ssl * 0.985, 2)
+                status = "OB_BASE_FORMING"
+
     else:
-        s1 = round(base_high * 1.0015, 2)
-        risk = max(ltp * 0.004, s1 - ltp)
-        r1 = round(ltp - risk * 2.0, 2)
-        r2 = round(ltp - risk * 3.5, 2)
+        # Fallback to Intraday Base Structure when HTF Daily candles are not available (e.g. synthetic test)
+        if hourly_ob.get("high") and hourly_ob.get("low"):
+            h_high = float(hourly_ob["high"])
+            h_low = float(hourly_ob["low"])
+            if abs(h_high - base_high) <= 0.015 * base_high and abs(h_low - base_low) <= 0.015 * base_low:
+                base_high = h_high
+                base_low = h_low
 
-        is_breakout = (c_b[-1] <= base_low - min_break_dist) and (c_b[-1] < vwap)
-        is_forming = base_low <= ltp <= base_high
-        is_retest = (h_b[-1] >= base_high * 0.998) and (c_b[-1] < base_high)
-        is_extended = ltp < base_low * 0.965
+        if direction == "LONG":
+            s1 = round(base_low * 0.9985, 2)
+            base_risk = max(base_high * 0.005, base_high - s1)
+            r1 = round(base_high + base_risk * 2.0, 2)
+            r2 = round(base_high + base_risk * 3.5, 2)
 
-    if is_extended:
-        status = "OB_EXTENDED"
-    elif is_breakout:
-        status = "OB_BREAKOUT_CONFIRMED"
-    elif is_retest:
-        status = "OB_RETEST_BOUNCE"
-    elif is_forming:
-        status = "OB_BASE_FORMING"
-    else:
-        status = "OB_ACTIVE"
+            for idx_b in range(len(day5)):
+                if c_b[idx_b] >= base_high + min_break_dist:
+                    first_break_hhmm = hhmm_list[idx_b]
+                    first_break_px = float(c_b[idx_b])
+                    break
+
+            is_breakout = (c_b[-1] >= base_high + min_break_dist) and (c_b[-1] > vwap)
+            is_forming = base_low <= ltp <= base_high
+            is_retest = (l_b[-1] <= base_low * 1.002) and (c_b[-1] > base_low)
+            is_extended = (ltp >= r1) or (ltp > base_high * 1.025)
+        else:
+            s1 = round(base_high * 1.0015, 2)
+            base_risk = max(base_low * 0.005, s1 - base_low)
+            r1 = round(base_low - base_risk * 2.0, 2)
+            r2 = round(base_low - base_risk * 3.5, 2)
+
+            for idx_b in range(len(day5)):
+                if c_b[idx_b] <= base_low - min_break_dist:
+                    first_break_hhmm = hhmm_list[idx_b]
+                    first_break_px = float(c_b[idx_b])
+                    break
+
+            is_breakout = (c_b[-1] <= base_low - min_break_dist) and (c_b[-1] < vwap)
+            is_forming = base_low <= ltp <= base_high
+            is_retest = (h_b[-1] >= base_high * 0.998) and (c_b[-1] < base_high)
+            is_extended = (ltp <= r1) or (ltp < base_low * 0.975)
+
+        if is_extended:
+            status = "OB_EXTENDED"
+        elif is_breakout:
+            status = "OB_BREAKOUT_CONFIRMED"
+        elif is_retest:
+            status = "OB_RETEST_BOUNCE"
+        elif is_forming:
+            status = "OB_BASE_FORMING"
+        else:
+            status = "OB_ACTIVE"
+
+        ob_zone = f"₹{base_low:,.2f} - ₹{base_high:,.2f}"
+
+    risk_pts = max(0.1, abs(ltp - s1))
+    reward_pts = max(0.1, abs(r1 - ltp))
+    rr_val = round(reward_pts / risk_pts, 1)
+    rr_ratio = f"1:{rr_val}"
 
     return {
         "status": status,
         "ob_low": round(base_low, 2),
         "ob_high": round(base_high, 2),
-        "ob_zone": f"₹{base_low:,.2f} - ₹{base_high:,.2f}",
+        "ob_zone": ob_zone,
         "s1": s1,
         "r1": r1,
         "r2": r2,
-        "rr_ratio": "1:2.0",
+        "rr_ratio": rr_ratio,
+        "htf_level_name": lvl_name,
+        "htf_level_px": round(lvl_px, 2),
         "weekly_ob": weekly_ob,
         "daily_ob": daily_ob,
         "hourly_ob": hourly_ob,
         "htf_warning": htf_warning,
-        "trigger_hhmm": trigger_hhmm,
+        "trigger_hhmm": first_break_hhmm or trigger_hhmm,
+        "first_break_hhmm": first_break_hhmm,
+        "first_break_px": round(first_break_px, 2),
     }
 
 
@@ -1240,6 +1580,13 @@ def _classify_option_timing(
     o_b = day5["open"].to_numpy()
     v_b = day5["volume"].to_numpy()
     o0 = float(o_b[0])
+    h0 = float(h_b[0])
+    l0 = float(l_b[0])
+    adverse_open_wick = (
+        round(max(0.0, o0 - l0) / max(0.01, o0) * 100.0, 2)
+        if direction == "LONG"
+        else round(max(0.0, h0 - o0) / max(0.01, o0) * 100.0, 2)
+    )
 
     tp_s = (day5["high"] + day5["low"] + day5["close"]) / 3.0
     cum_v = day5["volume"].cumsum().replace(0, 1)
@@ -1421,6 +1768,18 @@ def _classify_option_timing(
             safe = False
             pts_adj = -26.0
             note = f"Morning move stalled (expansion {rng_expansion:+.2f}A, CLV {clv_dir:.2f})"
+        elif adverse_open_wick > 0.40:
+            phase = "CHOP_DECAY"
+            label = "ADVERSE OPEN WICK (2-WAY)"
+            safe = False
+            pts_adj = -22.0
+            note = f"Adverse open wick {adverse_open_wick:.2f}% (>0.40%) — 2-way whipsaw risk"
+        elif dir_move_open >= 2.50 and dir_ema9_dist > 0.70:
+            phase = "WAIT_PULLBACK"
+            label = "OVEREXPANDED (+2.5%)"
+            safe = False
+            pts_adj = -18.0
+            note = f"Move {dir_move_open:+.2f}% already extended — wait for 9EMA pullback"
         elif dir_ema9_dist > 1.30 or (dir_vwap_dist > 2.20 and dir_ema9_dist > 0.85):
             phase = "WAIT_PULLBACK"
             label = "WAIT PB (STRETCHED)"
@@ -1487,10 +1846,11 @@ def _classify_option_timing(
         note = f"Active pullback (15m {net3_pct:+.2f}%, 25m {net5_pct:+.2f}%) — wait for 9EMA bounce"
     elif (
         dir_move_open >= 1.80
+        and dir_move_open < 2.50
         and post1h_net >= 1.00
         and post1h_eff >= 0.40
         and (h1_net >= 0.30 or (post1h_net >= 2.0 and post1h_eff >= 0.50))
-        and dir_ema9_dist <= 1.45
+        and dir_ema9_dist <= 0.85
         and ema_sep_pct >= 0.10
     ):
         phase = "CLEAN_TREND"
@@ -1506,7 +1866,7 @@ def _classify_option_timing(
         and vwap_hold_pct >= 75.0
         and day_pos >= 0.65
         and (-0.40 <= dir_ema9_dist <= 0.65)
-        and h1_rng <= 1.50
+        and h1_rng <= 1.30
     ):
         phase = "FLAG_CONSOLIDATION"
         label = "HIGH TIGHT FLAG"
@@ -1516,7 +1876,7 @@ def _classify_option_timing(
         note = f"{brk_tag}Flag at Day Highs: VWAP {vwap_hold_pct:.0f}% · Post1h {post1h_net:+.2f}% · Box {h1_rng:.2f}%"
     elif (
         dir_move_open >= 1.80
-        and (-0.25 <= dir_ema9_dist <= 0.55)
+        and (-0.25 <= dir_ema9_dist <= 0.45)
         and ema_sep_pct >= 0.12
         and (post1h_net >= 0.80 and post1h_eff >= 0.45 and h1_net >= 0.25)
         and (net3_pct >= 0.05 or (body_ratio >= 0.35 and close_loc >= 0.55))
@@ -1543,6 +1903,12 @@ def _classify_option_timing(
         pts_adj = 12.0 + dna_bonus + min(6.0, post1h_net * 1.8)
         brk_tag = "PDH/L Brk · " if pd_brk else ""
         note = f"{brk_tag}Coil {coil_pct:.2f}% Breakout · VWAP {vwap_hold_pct:.0f}% · {rng_vs_atr:.1f}x ATR"
+    elif dir_move_open >= 2.50:
+        phase = "WAIT_PULLBACK"
+        label = f"EXTENDED (+{dir_move_open:.1f}%)"
+        safe = False
+        pts_adj = -18.0
+        note = f"Move {dir_move_open:+.2f}% extended (>2.5%) — wait for 9EMA base pullback before options entry"
     else:
         phase = "CHOP_DECAY"
         label = "LOW THRUST (DECAY)"
@@ -1559,6 +1925,7 @@ def _classify_option_timing(
         "early_bar_eff": bar_eff,
         "early_path_eff": path_eff,
         "dir_clv": clv_dir,
+        "adverse_open_wick": adverse_open_wick,
         "vw_dist_atr": vw_dist_atr,
         "orb_broken": orb_broken,
         "rng_expansion": rng_expansion,
@@ -1653,9 +2020,8 @@ def evaluate_live_momentum_board(
         c1d = db.load_candles(sym_u, "1D", 250)
         day5 = pd.DataFrame()
         cur_d = now_ist.date()
-        if c5 and c15:
+        if c5:
             df5 = _candles_to_df(c5)
-            df15 = _candles_to_df(c15)
             max_d = df5["trade_date"].max()
             is_live_mode = str(breadth.get("source") or breadth.get("data_source") or "").lower() == "live"
             if is_live_mode and max_d != now_ist.date():
@@ -1665,17 +2031,27 @@ def evaluate_live_momentum_board(
                 cur_d = now_ist.date()
             else:
                 cur_d = max_d
-                day15 = df15[df15["trade_date"] == cur_d]
-                hist15 = df15[df15["trade_date"] < cur_d].tail(60)
-                if not day15.empty and not hist15.empty:
-                    med15 = float(hist15["volume"].median()) or 1.0
-                    bar0 = day15.iloc[0]
-                    r15_0_rv = round(float(bar0["volume"]) / med15, 2)
-                    rng0 = max(0.01, float(bar0["high"]) - float(bar0["low"]))
-                    clv_15_0 = round((float(bar0["close"]) - float(bar0["low"])) / rng0, 2)
                 day5 = df5[df5["trade_date"] == cur_d]
                 if not day5.empty:
                     trig_time = f"{cur_d.isoformat()} {day5['hhmm'].iloc[-1]} IST (Live Session)"
+
+                if c15:
+                    df15 = _candles_to_df(c15)
+                else:
+                    df15 = _candles_to_df(_resample_5m_records(df5, "15min"))
+
+                if not df15.empty and "trade_date" in df15.columns:
+                    day15 = df15[df15["trade_date"] == cur_d]
+                    hist15 = df15[df15["trade_date"] < cur_d].tail(60)
+                    if not day15.empty and not hist15.empty:
+                        med15 = float(hist15["volume"].median()) or 1.0
+                        bar0 = day15.iloc[0]
+                        r15_0_rv = round(float(bar0["volume"]) / med15, 2)
+                        rng0 = max(0.01, float(bar0["high"]) - float(bar0["low"]))
+                        clv_15_0 = round((float(bar0["close"]) - float(bar0["low"])) / rng0, 2)
+
+                if not c1h and not df5.empty:
+                    c1h = _resample_5m_records(df5, "60min")
 
         atr14_val = 0.0
         pdh_val = 0.0
@@ -1796,6 +2172,43 @@ def evaluate_live_momentum_board(
             pts -= 18.0
             reasons.append(f"ANTI-CHASING / T-1 EXHAUSTION (T-1 {t1_ret_pct:+.2f}% + Gap {gap_pct:+.2f}%)")
 
+        # 3. Adverse Open-Wick Gate:
+        adverse_open_wick = float(opt_timing.get("adverse_open_wick", 0.0))
+        if adverse_open_wick > 0.40:
+            pts -= 8.0
+            reasons.append(f"Adverse Open Wick Caution ({adverse_open_wick:.2f}%) — 2-Way Whipsaw Risk")
+
+        # Look up F&O lot size from DB instruments
+        inst_meta = db.get_instrument(sym_u)
+        lot_size = int(inst_meta.get("fno_lot_size") or 100) if inst_meta else 100
+
+        # Fetch HTF Daily & Weekly Liquidity Levels and Option Chain S&R:
+        from app.liquidity_engine import get_htf_liquidity_levels, identify_candle_pattern
+
+        htf_levels = get_htf_liquidity_levels(sym_u, cur_d)
+        opt_chain_sr = get_option_chain_sr(sym_u, ltp, direction, lot_size)
+
+        # Candlestick Pattern on 5m Trigger Bar & Relative Volume:
+        if not day5.empty:
+            candle_pattern = identify_candle_pattern(day5.iloc[-1], day5.iloc[-2] if len(day5) >= 2 else None)
+            vol_med_10 = float(day5["volume"].rolling(10, min_periods=1).median().iloc[-1]) or 1.0
+            cur_bar_vol = float(day5["volume"].iloc[-1])
+            rvol = round(cur_bar_vol / vol_med_10, 2)
+        else:
+            candle_pattern = "Market Open Structure"
+            rvol = 1.0
+
+        # Smart Money Order Block & Strike Recommendation (Top-Down MTF: Weekly -> Daily -> Hourly -> 5m)
+        ob_info = compute_order_block(day5, direction, ltp, vwap, c1d=c1d, c1h=c1h, htf_levels=htf_levels, opt_chain_sr=opt_chain_sr)
+        opt_strike = recommend_option_strike(sym_u, ltp, direction, lot_size)
+
+        # 4. Intraday Overexpansion Gate:
+        intraday_extended = (dir_move >= 2.20 and opt_timing.get("option_phase") == "WAIT_PULLBACK") or (ob_info.get("status") == "OB_EXTENDED")
+        if intraday_extended:
+            anti_chasing = True
+            pts -= 18.0
+            reasons.append(f"ANTI-CHASING / EXTENDED (+{dir_move:.2f}%) — Wait for 9EMA Base Pullback")
+
         # Option Buyer Absolute Rule: A stock MUST have dir_move >= 1.80% (or 1.25% early morning)
         # to ever be considered Option-Ready (Safe). Below that, it's guaranteed theta decay!
         # Must pass option timing engine, must not be anti-chasing, and must not fight broader market tide.
@@ -1806,15 +2219,8 @@ def evaluate_live_momentum_board(
             and vwap_aligned
             and not anti_chasing
             and not counter_breadth
+            and (adverse_open_wick <= 0.70)
         )
-
-        # Look up F&O lot size from DB instruments
-        inst_meta = db.get_instrument(sym_u)
-        lot_size = int(inst_meta.get("fno_lot_size") or 100) if inst_meta else 100
-
-        # Smart Money Order Block & Strike Recommendation (Top-Down MTF: Weekly -> Daily -> Hourly -> 5m)
-        ob_info = compute_order_block(day5, direction, ltp, vwap, c1d=c1d, c1h=c1h)
-        opt_strike = recommend_option_strike(sym_u, ltp, direction, lot_size)
 
         # Volume Delta shares & OI build-up
         net_cvd = float(opt_timing.get("net_cvd_shares") or 0.0)
@@ -1827,6 +2233,42 @@ def evaluate_live_momentum_board(
         else:
             oi_build_up = "SHORT BUILD-UP" if opt_timing.get("cvd_pct", 0) <= 0 else "LONG UNWINDING"
 
+        # Overhead / Support Strike Wall Guardrail (Institutional Call/Put Writer Barriers)
+        strike_step = get_strike_step(ltp)
+        strike_barrier_blocked = False
+        strike_barrier_reason = ""
+        if direction == "LONG":
+            overhead_strike = math.ceil(ltp / strike_step) * strike_step
+            dist_to_strike = max(0.0, overhead_strike - ltp)
+            dist_pct = (dist_to_strike / max(0.01, ltp)) * 100.0
+            if dist_pct <= 0.60 and len(day5) >= 3 and oi_build_up != "CALL_UNWINDING_SQUEEZE":
+                recent_h = day5["high"].iloc[-4:].to_numpy(dtype=float)
+                recent_c = day5["close"].iloc[-4:].to_numpy(dtype=float)
+                strike_tested = any(x >= overhead_strike * 0.999 for x in recent_h)
+                closed_above = any(x >= overhead_strike for x in recent_c)
+                if strike_tested and not closed_above:
+                    strike_barrier_blocked = True
+                    strike_barrier_reason = f"Trapped under ₹{overhead_strike:,.0f} Call Strike ({dist_to_strike:.2f} pts away) with multiple rejections"
+        else:
+            support_strike = math.floor(ltp / strike_step) * strike_step
+            dist_to_strike = max(0.0, ltp - support_strike)
+            dist_pct = (dist_to_strike / max(0.01, ltp)) * 100.0
+            if dist_pct <= 0.60 and len(day5) >= 3 and oi_build_up not in ("LONG_LIQUIDATION_SQUEEZE", "PUT_UNWINDING"):
+                recent_l = day5["low"].iloc[-4:].to_numpy(dtype=float)
+                recent_c = day5["close"].iloc[-4:].to_numpy(dtype=float)
+                strike_tested = any(x <= support_strike * 1.001 for x in recent_l)
+                closed_below = any(x <= support_strike for x in recent_c)
+                if strike_tested and not closed_below:
+                    strike_barrier_blocked = True
+                    strike_barrier_reason = f"Trapped above ₹{support_strike:,.0f} Put Strike ({dist_to_strike:.2f} pts away) with multiple rejections"
+
+        if strike_barrier_blocked:
+            is_opt_safe = False
+            pts -= 16.0
+            reasons.append(f"⛔ STRIKE RESISTANCE: {strike_barrier_reason}")
+            if ob_info["status"] == "OB_BREAKOUT_CONFIRMED":
+                ob_info["status"] = "OB_STRIKE_RESISTANCE"
+
         # Confluence bonus for Order Block Confirmation (never overrides option_safe timing)
         if ob_info.get("htf_warning"):
             pts -= 22.0
@@ -1834,7 +2276,9 @@ def evaluate_live_momentum_board(
             reasons.append(f"⚠️ HTF WARNING: {ob_info['htf_warning']}")
         elif ob_info["status"] == "OB_BREAKOUT_CONFIRMED":
             pts += 15.0
-            reasons.append(f"1H OB Breakdown Confirmed < ₹{ob_info['ob_low']} (S1 ₹{ob_info['s1']} · R1 ₹{ob_info['r1']})")
+            brk_lvl = ob_info['ob_high'] if direction == "LONG" else ob_info['ob_low']
+            brk_verb = "Breakout" if direction == "LONG" else "Breakdown"
+            reasons.append(f"1H OB {brk_verb} Confirmed {brk_lvl} (S1 ₹{ob_info['s1']} · R1 ₹{ob_info['r1']})")
             if not pb_confirmed and is_opt_safe:
                 status_tag = "OB BREAKOUT"
         elif ob_info["status"] == "OB_RETEST_BOUNCE":
@@ -1842,6 +2286,8 @@ def evaluate_live_momentum_board(
             reasons.append(f"1H OB Retest Bounce from ₹{ob_info['ob_high']} (S1 ₹{ob_info['s1']} · R1 ₹{ob_info['r1']})")
             if not pb_confirmed and is_opt_safe:
                 status_tag = "OB RETEST"
+        elif ob_info["status"] == "OB_EXTENDED":
+            reasons.append(f"1H OB Extended (R1 ₹{ob_info['r1']} reached) — Exhaustion Zone")
         elif ob_info["status"] == "OB_BASE_FORMING":
             reasons.append(f"1H OB Base Forming ({ob_info['ob_zone']}) — Watch for Breakout")
 
@@ -1914,6 +2360,12 @@ def evaluate_live_momentum_board(
                 "setup_id": setup.get("id") if setup else None,
                 "lot_size": lot_size,
                 "order_block": ob_info,
+                "htf_levels": htf_levels,
+                "opt_chain_sr": opt_chain_sr,
+                "candle_pattern": candle_pattern,
+                "rvol": rvol,
+                "strike_barrier_blocked": strike_barrier_blocked,
+                "strike_barrier_reason": strike_barrier_reason,
                 "option_strike": opt_strike,
                 "oi_build_up": oi_build_up,
                 "vol_delta_shares": vol_delta_shares,
@@ -1945,7 +2397,52 @@ def evaluate_live_momentum_board(
         item["conviction_score"] = int(round(min(99.0, max(50.0, item["score"]))))
 
     db.save_live_momentum(trade_date_str, selected)
-    new_alerts = evaluate_and_record_alerts(selected, trade_date_str)
+
+    # Ensure all symbols with an active trade lifecycle today are evaluated for exits:
+    eval_candidates = list(selected)
+    try:
+        with db.connect() as conn:
+            rows_act = conn.execute(
+                "SELECT DISTINCT symbol FROM live_alerts WHERE trade_date = ?",
+                (trade_date_str,),
+            ).fetchall()
+            active_syms = {r["symbol"].upper() for r in rows_act}
+        selected_syms = {item["symbol"].upper() for item in selected}
+        missing_active = active_syms - selected_syms
+        if missing_active:
+            row_map = {r["symbol"].upper(): r for r in rows}
+            for sym_act in missing_active:
+                if sym_act in row_map:
+                    eval_candidates.append(row_map[sym_act])
+                else:
+                    # Construct monitoring record from candles & quotes for active trades that decayed out of rows
+                    q_act = quotes_map.get(sym_act, {})
+                    c5_act = db.load_candles(sym_act, "5m", 30)
+                    if c5_act:
+                        df5_act = _candles_to_df(c5_act)
+                        max_d_act = df5_act["trade_date"].max()
+                        day5_act = df5_act[df5_act["trade_date"] == max_d_act]
+                        if not day5_act.empty:
+                            last_b = day5_act.iloc[-1]
+                            ltp_act = float(q_act.get("last_price") or last_b["close"])
+                            vwap_act = float(q_act.get("average_price") or ((day5_act["close"] * day5_act["volume"]).sum() / max(1, day5_act["volume"].sum())))
+                            last_alt = db.get_last_alert_for_symbol(sym_act, trade_date_str)
+                            dir_act = last_alt.get("direction", "LONG") if last_alt else "LONG"
+                            ob_act = compute_order_block(day5_act, dir_act, ltp_act, vwap_act)
+                            eval_candidates.append({
+                                "symbol": sym_act,
+                                "direction": dir_act,
+                                "ltp": ltp_act,
+                                "vwap": vwap_act,
+                                "score": 50.0,
+                                "option_safe": False,
+                                "order_block": ob_act,
+                                "reasons": [],
+                            })
+    except Exception:
+        pass
+
+    new_alerts = evaluate_and_record_alerts(eval_candidates, trade_date_str)
     return {
         "trade_date": trade_date_str,
         "count": len(selected),
@@ -1987,14 +2484,7 @@ def evaluate_and_record_alerts(
 
     for item in board_items:
         sym = str(item.get("symbol", "")).upper()
-        if not sym:
-            continue
-
-        is_opt_safe = bool(item.get("option_safe"))
-        score = float(item.get("score", 0.0))
-        # Strict Option Buyer Protection:
-        # NEVER trigger entry alerts on choppy, stalled, or decaying stocks!
-        if not is_opt_safe:
+        if not sym or not is_valid_fno_symbol(sym):
             continue
 
         direction = str(item.get("direction", "LONG")).upper()
@@ -2007,6 +2497,11 @@ def evaluate_and_record_alerts(
         s1 = float(ob_info.get("s1", ltp * 0.99))
         r1 = float(ob_info.get("r1", ltp * 1.015))
         r2 = float(ob_info.get("r2", ltp * 1.03))
+        first_break_hhmm = ob_info.get("first_break_hhmm")
+        first_break_px = float(ob_info.get("first_break_px", 0.0))
+
+        is_opt_safe = bool(item.get("option_safe"))
+        score = float(item.get("score", 0.0))
 
         opt_strike = item.get("option_strike") or {}
         opt_name = str(opt_strike.get("option_name", f"{sym} ATM"))
@@ -2020,25 +2515,142 @@ def evaluate_and_record_alerts(
 
         last_alert = db.get_last_alert_for_symbol(sym, trade_date_str)
 
+        # HTF Liquidity Anchor, Candlestick Pattern, Volume Reaction & Option Chain S&R Context:
+        htf_lvl_name = str(ob_info.get("htf_level_name") or "Daily BSL/SSL")
+        htf_lvl_px = float(ob_info.get("htf_level_px") or 0.0)
+        candle_pattern = str(item.get("candle_pattern") or "Institutional Confirmation")
+        rvol = float(item.get("rvol") or 1.0)
+        vol_reaction = f"⚡ RVOL {rvol:.1f}x ({'Absorption Surge' if rvol >= 1.3 else 'Expansion'})"
+
+        opt_chain_sr_data = item.get("opt_chain_sr") or get_option_chain_sr(sym, ltp, direction, 100)
+        max_ce_strike = opt_chain_sr_data.get("max_call_oi_strike", 0)
+        max_pe_strike = opt_chain_sr_data.get("max_put_oi_strike", 0)
+        opt_chain_sr_str = str(opt_chain_sr_data.get("option_chain_sr") or "")
+        net_cvd = float(item.get("net_cvd_shares") or 0.0)
+
+        # Minimum structural distance: Target R1 and Invalidation S1 must be real price levels
+        # (at least 0.5% away from each other), not equal to LTP!
+        if abs(r1 - s1) < 0.005 * ltp or r1 <= 0 or s1 <= 0:
+            continue
+
         trigger_event: str | None = None
         event_reason: str = ""
 
+        # Check if stock has already reached Target R1 or is extended beyond base
+        is_extended_move = (
+            (direction == "LONG" and (ltp >= r1 or ob_status == "OB_EXTENDED"))
+            or (direction == "SHORT" and (ltp <= r1 or ob_status == "OB_EXTENDED"))
+        )
+
         if last_alert is None:
             # Case 1: First detection of the day for this symbol
-            if ob_status == "OB_BREAKOUT_CONFIRMED":
+            # Strict HTF Liquidity Funnel Gate:
+            # Stock MUST be interacting with a Daily/Weekly Liquidity Pool (PDH, PDL, PWH, PWL)!
+            # Reject generic intraday consolidation in no-man's land inside the range.
+            is_htf_level = any(k in htf_lvl_name for k in ("Daily BSL", "Daily SSL", "Weekly BSL", "Weekly SSL", "PDH", "PDL", "PWH", "PWL"))
+            if not is_htf_level or "Inside HTF Range" in htf_lvl_name:
+                continue
+
+            # Reject unverified or junk setups where Order Block structure is missing or blocked by Strike Wall:
+            if ob_status in ("EARLY_OPEN", "NO_DATA", "OB_ACTIVE", "OB_BASE_FORMING", "OB_STRIKE_RESISTANCE") or item.get("strike_barrier_blocked"):
+                continue
+
+            # Strict Smart Money Rule: NEVER fire alerts for already-extended or runaway moves!
+            # If the train has already left the station, we DO NOT chase.
+            if is_extended_move or item.get("anti_chasing"):
+                continue
+
+            # Must be an Option-Safe, High-Conviction setup:
+            if not is_opt_safe or score < 70.0:
+                continue
+
+            # Gate 1: Candlestick Pattern Confirmation on 5m Trigger Candle
+            # Institutional Smart Money Rule: Entry must be verified by bullish/bearish pattern, never catch a falling knife!
+            if direction == "LONG":
+                is_bullish = any(k in candle_pattern for k in ("Bullish Pin Bar", "Bullish Engulfing", "Bullish Rejection", "Bullish Displacement", "Institutional Confirmation", "Market Open Structure")) or (ltp >= vwap and not ("Shooting Star" in candle_pattern or "Bearish Engulfing" in candle_pattern))
+                if not is_bullish or "Shooting Star" in candle_pattern or "Bearish Engulfing" in candle_pattern:
+                    continue
+                # Reject if trigger candle prints an adverse upper wick >= 20.0% (bull trap / seller rejection)
+                c5_chk = db.load_candles(sym, "5m", 3)
+                if c5_chk:
+                    b_last = c5_chk[-1]
+                    b_rng = max(0.05, float(b_last.get("high", 0)) - float(b_last.get("low", 0)))
+                    b_uwick = float(b_last.get("high", 0)) - max(float(b_last.get("open", 0)), float(b_last.get("close", 0)))
+                    if (b_uwick / b_rng) >= 0.20:
+                        continue
+            else:
+                is_bearish = any(k in candle_pattern for k in ("Shooting Star", "Bearish Engulfing", "Bearish Rejection", "Bearish Displacement", "Institutional Confirmation", "Market Open Structure")) or (ltp <= vwap and not ("Bullish Pin Bar" in candle_pattern or "Bullish Engulfing" in candle_pattern))
+                if not is_bearish or "Bullish Pin Bar" in candle_pattern or "Bullish Engulfing" in candle_pattern:
+                    continue
+                # Reject if trigger candle prints an adverse lower wick >= 20.0% (bear trap / buyer absorption)
+                c5_chk = db.load_candles(sym, "5m", 3)
+                if c5_chk:
+                    b_last = c5_chk[-1]
+                    b_rng = max(0.05, float(b_last.get("high", 0)) - float(b_last.get("low", 0)))
+                    b_lwick = min(float(b_last.get("open", 0)), float(b_last.get("close", 0))) - float(b_last.get("low", 0))
+                    if (b_lwick / b_rng) >= 0.20:
+                        continue
+
+            # Gate 2: Volume Reaction & Delta Surge
+            # Must see active institutional volume participation (RVOL >= 1.2x or net CVD thrust)
+            # Blocks sluggish volume and lunch-time chop naturally!
+            has_cvd_thrust = (direction == "LONG" and (net_cvd > 0 or "UNWINDING" in oi_buildup)) or (direction == "SHORT" and (net_cvd < 0 or "LIQUIDATION" in oi_buildup))
+            if rvol < 1.20 and not has_cvd_thrust:
+                continue
+
+            # Gate 3: Option Chain Support & Resistance Headroom
+            min_reward_pts = 20.0 if ltp >= 1000.0 else max(2.5, ltp * 0.012)
+            if direction == "LONG":
+                if max_ce_strike > 0:
+                    dist_to_ce = max_ce_strike - ltp
+                    # Blocked if trapped right under Max Call OI or headroom < min_reward_pts
+                    if dist_to_ce <= max(1.0, ltp * 0.005) or dist_to_ce < min_reward_pts:
+                        continue
+                    r1 = min(r1, float(max_ce_strike))
+            else:
+                if max_pe_strike > 0:
+                    dist_to_pe = ltp - max_pe_strike
+                    if dist_to_pe <= max(1.0, ltp * 0.005) or dist_to_pe < min_reward_pts:
+                        continue
+                    r1 = max(r1, float(max_pe_strike))
+
+            # Gate 4: Asymmetric Risk-Reward Guardrails: "reward jyada ho, km se km 20-25 point ka aur loss minimum ho"
+            reward_pts = abs(r1 - ltp)
+            risk_pts = abs(ltp - s1)
+
+            # Minimum Loss: Stop Loss strictly capped (tight SL <= 2.2% of LTP)
+            if risk_pts > 0.022 * ltp or risk_pts <= 0:
+                continue
+
+            # High Reward: Minimum expansion target
+            if reward_pts < min_reward_pts:
+                continue
+
+            # High Risk:Reward Ratio check (min 1.1:1 floor, target 1.8-2.5:1)
+            if (reward_pts / max(0.1, risk_pts)) < 1.10:
+                continue
+
+            # Must be an actionable Entry forming RIGHT NOW:
+            if "Sweep" in htf_lvl_name:
+                trigger_event = "SWEEP_REVERSAL"
+                event_reason = f"{htf_lvl_name} Liquidity Sweep & Reversal confirmed with {candle_pattern} & {vol_reaction}"
+            elif ob_status == "OB_BREAKOUT_CONFIRMED":
                 trigger_event = "OB_BREAKOUT"
-                event_reason = f"Order Block breakout confirmed above {ob_zone} with clean VWAP hold"
+                event_reason = f"{htf_lvl_name} Breakout confirmed with {candle_pattern} & {vol_reaction}"
             elif ob_status == "OB_RETEST_BOUNCE":
                 trigger_event = "OB_RETEST_BOUNCE"
-                event_reason = f"Pullback retest and bounce inside Order Block {ob_zone}"
-            elif item.get("status_tag") in ("CREAM_BULL_V2", "STRICT_BEAR_V2", "P14B_RECLAIM"):
-                trigger_event = "MOMENTUM_EXPANSION"
-                event_reason = f"Strong momentum expansion with {oi_buildup} & Volume Delta {vol_delta}"
+                if direction == "SHORT":
+                    event_reason = f"{htf_lvl_name} Breakdown retest failed to reclaim (Resistance confirmed) + {candle_pattern} & {vol_reaction}"
+                else:
+                    event_reason = f"{htf_lvl_name} Breakout retest held as support + {candle_pattern} & {vol_reaction}"
+            elif item.get("status_tag") in ("CREAM_BULL_V2", "STRICT_BEAR_V2") and score >= 80.0:
+                trigger_event = "OB_BREAKOUT"
+                event_reason = f"High-conviction {htf_lvl_name} expansion ({candle_pattern} · {vol_reaction})"
             else:
                 # Do NOT fire generic alerts when stock is merely resting/forming a base inside a range!
                 continue
         else:
-            # Case 2: Subsequent check - check for new catalysts or exits
+            # Case 2: Subsequent check - check for fast exits or trade completion
             prior_epoch = int(last_alert.get("epoch_ts", 0))
             elapsed_sec = max(0, now_epoch - prior_epoch)
             prior_event = str(last_alert.get("event_type", ""))
@@ -2046,43 +2658,87 @@ def evaluate_and_record_alerts(
             prior_r1 = float(last_alert.get("r1", 0.0))
             prior_s1 = float(last_alert.get("s1", 0.0))
 
+            # Once an exit or target is hit, the trade lifecycle is closed for the day.
+            # STRICT 30-YEAR PROP-DESK RULE: "1 SYMBOL = 1 CLEAN TRADE PER DAY" (NO RE-ENTRY).
+            if prior_event in ("TARGET_R1_HIT", "INVALIDATION_EXIT", "BULL_TRAP_EXIT", "BEAR_TRAP_EXIT", "VWAP_BREAKDOWN_EXIT", "VWAP_RECLAIM_EXIT", "BREAKOUT_FAILED_EXIT", "BREAKDOWN_FAILED_EXIT"):
+                continue
+
+            # Fast Smart Money Exit Checks:
+            # 1. Bearish / Bullish Liquidity Sweep (Bull Trap / Bear Trap Exit)
+            c5 = db.load_candles(sym, "5m", 8)
+            if c5:
+                for b in reversed(c5[-4:]):
+                    b_o = float(b.get("open") or 0)
+                    b_h = float(b.get("high") or 0)
+                    b_l = float(b.get("low") or 0)
+                    b_c = float(b.get("close") or 0)
+                    b_rng = max(0.05, b_h - b_l)
+                    up_wick = (b_h - max(b_o, b_c)) / b_rng * 100.0
+                    lo_wick = (min(b_o, b_c) - b_l) / b_rng * 100.0
+
+                    if direction == "LONG" and up_wick >= 20.0 and b_h >= prior_price * 1.002 and b_c <= b_o and ltp < prior_price:
+                        trigger_event = "BULL_TRAP_EXIT"
+                        event_reason = f"Bull trap / Liquidity sweep detected ({up_wick:.0f}% upper wick at ₹{b_h:,.2f}). Price failed to hold breakout - exit long immediately!"
+                        break
+                    elif direction == "SHORT" and lo_wick >= 20.0 and b_l <= prior_price * 0.998 and b_c >= b_o and ltp > prior_price:
+                        trigger_event = "BEAR_TRAP_EXIT"
+                        event_reason = f"Bear trap / Liquidity sweep detected ({lo_wick:.0f}% lower wick at ₹{b_l:,.2f}). Price failed to hold breakdown - exit short immediately!"
+                        break
+
+            # 2. Breakout Failure / Retracement back inside base or lost VWAP
+            if not trigger_event:
+                ob_high = float(ob_info.get("ob_high") or 0.0)
+                ob_low = float(ob_info.get("ob_low") or 0.0)
+                if direction == "LONG" and (ltp < vwap or (ob_high > 0 and ltp <= ob_high * 1.001)) and ltp < prior_price * 0.997:
+                    trigger_event = "BREAKOUT_FAILED_EXIT"
+                    event_reason = f"Breakout failed: Price ₹{ltp:,.2f} lost VWAP / retreated back inside base (₹{ob_high:,.2f}). Cut loss immediately!"
+                elif direction == "SHORT" and (ltp > vwap or (ob_low > 0 and ltp >= ob_low * 0.999)) and ltp > prior_price * 1.003:
+                    trigger_event = "BREAKDOWN_FAILED_EXIT"
+                    event_reason = f"Breakdown failed: Price ₹{ltp:,.2f} reclaimed VWAP / retreated back inside base (₹{ob_low:,.2f}). Cut loss immediately!"
+
+            # Distance validation to avoid 5-paisa tick jitter
+            target_distance_ok = (
+                (direction == "LONG" and prior_r1 >= prior_price * 1.004)
+                or (direction == "SHORT" and prior_r1 <= prior_price * 0.996)
+            )
+            stop_distance_ok = (
+                (direction == "LONG" and prior_s1 <= prior_price * 0.996)
+                or (direction == "SHORT" and prior_s1 >= prior_price * 1.004)
+            )
+
             # a) Target R1 Reached (Profit Booking / Trail SL)
-            if direction == "LONG" and ltp >= prior_r1 and prior_event != "TARGET_R1_HIT" and prior_r1 > 0:
+            if direction == "LONG" and ltp >= prior_r1 and target_distance_ok and prior_r1 > 0:
                 trigger_event = "TARGET_R1_HIT"
                 event_reason = f"Target R1 ₹{prior_r1:,.2f} reached (+{((ltp - prior_price)/prior_price)*100.0:.1f}%), book partial or trail SL"
-            elif direction == "SHORT" and ltp <= prior_r1 and prior_event != "TARGET_R1_HIT" and prior_r1 > 0:
+            elif direction == "SHORT" and ltp <= prior_r1 and target_distance_ok and prior_r1 > 0:
                 trigger_event = "TARGET_R1_HIT"
                 event_reason = f"Target R1 ₹{prior_r1:,.2f} reached (-{((prior_price - ltp)/prior_price)*100.0:.1f}%), book partial or trail SL"
 
             # b) Invalidation S1 Breached (Cut Loss / Exit Alert)
-            elif direction == "LONG" and ltp < prior_s1 and prior_event != "INVALIDATION_EXIT" and prior_s1 > 0:
+            elif direction == "LONG" and ltp < prior_s1 and stop_distance_ok and prior_s1 > 0:
                 trigger_event = "INVALIDATION_EXIT"
                 event_reason = f"Support S1 ₹{prior_s1:,.2f} breached, setup invalidated - exit immediately"
-            elif direction == "SHORT" and ltp > prior_s1 and prior_event != "INVALIDATION_EXIT" and prior_s1 > 0:
+            elif direction == "SHORT" and ltp > prior_s1 and stop_distance_ok and prior_s1 > 0:
                 trigger_event = "INVALIDATION_EXIT"
                 event_reason = f"Resistance S1 ₹{prior_s1:,.2f} breached, setup invalidated - exit immediately"
 
             # c) Promotion to Confirmed Breakout
-            elif prior_event in ("ORDER_BLOCK_TRIGGER", "OB_RETEST_BOUNCE") and ob_status == "OB_BREAKOUT_CONFIRMED" and elapsed_sec >= 180:
+            elif prior_event in ("ORDER_BLOCK_TRIGGER", "OB_RETEST_BOUNCE") and ob_status == "OB_BREAKOUT_CONFIRMED" and elapsed_sec >= 180 and is_opt_safe:
                 trigger_event = "OB_BREAKOUT"
                 event_reason = f"Promoted from consolidation to Confirmed Breakout above {ob_zone}"
 
-            # d) New Higher/Lower Order Block formed after continuation (min 8 mins & 1.0% shift)
-            elif direction == "LONG" and ((ltp - prior_price) / max(1.0, prior_price) >= 0.010) and ob_zone != last_alert.get("ob_zone") and elapsed_sec >= 480:
-                trigger_event = "NEW_HIGHER_OB"
-                event_reason = f"Continuation impulse formed new higher Order Block at {ob_zone}"
-            elif direction == "SHORT" and ((prior_price - ltp) / max(1.0, prior_price) >= 0.010) and ob_zone != last_alert.get("ob_zone") and elapsed_sec >= 480:
-                trigger_event = "NEW_LOWER_OB"
-                event_reason = f"Continuation impulse formed new lower Order Block at {ob_zone}"
-
-            # e) Institutional Squeeze Surge
-            elif oi_buildup in ("SHORT_COVERING", "CALL_UNWINDING_SQUEEZE") and last_alert.get("oi_build_up") not in ("SHORT_COVERING", "CALL_UNWINDING_SQUEEZE") and elapsed_sec >= 300:
+            # d) Institutional Squeeze Surge
+            elif oi_buildup in ("SHORT_COVERING", "CALL_UNWINDING_SQUEEZE") and last_alert.get("oi_build_up") not in ("SHORT_COVERING", "CALL_UNWINDING_SQUEEZE") and elapsed_sec >= 300 and is_opt_safe:
                 trigger_event = "INSTITUTIONAL_SQUEEZE"
                 event_reason = f"Institutional Call Unwinding squeeze detected with Delta {vol_delta}"
 
         if trigger_event is not None:
             alert_id = f"ALT_{sym}_{now_ist.strftime('%Y%m%d_%H%M%S')}_{trigger_event}"
             reasons_full = [event_reason] + [r for r in reasons if r != event_reason]
+            rec_reward_pts = round(abs(prior_r1 - ltp) if last_alert else abs(r1 - ltp), 2)
+            rec_risk_pts = round(abs(ltp - prior_s1) if last_alert else abs(ltp - s1), 2)
+            rec_rr_ratio = f"1:{round(rec_reward_pts / max(0.1, rec_risk_pts), 1)}"
+
             alert_record = {
                 "alert_id": alert_id,
                 "trade_date": trade_date_str,
@@ -2107,6 +2763,17 @@ def evaluate_and_record_alerts(
                 "option_tp1_premium": round(opt_tp1, 2),
                 "reasons": reasons_full,
                 "created_at": now_ist.isoformat(timespec="seconds"),
+                "htf_level_name": htf_lvl_name,
+                "htf_level_px": round(htf_lvl_px, 2),
+                "candle_pattern": candle_pattern,
+                "rvol": round(rvol, 2),
+                "volume_reaction": vol_reaction,
+                "reward_pts": rec_reward_pts,
+                "risk_pts": rec_risk_pts,
+                "rr_ratio": rec_rr_ratio,
+                "max_call_oi_strike": max_ce_strike,
+                "max_put_oi_strike": max_pe_strike,
+                "option_chain_sr": opt_chain_sr_str,
             }
             db.save_live_alert(alert_record)
             new_alerts.append(alert_record)
